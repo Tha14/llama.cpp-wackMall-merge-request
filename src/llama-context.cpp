@@ -2,6 +2,7 @@
 
 #include "llama-expert-pin.h"
 #include "llama-expert-preload.h"
+#include "llama-expert-tier.h"
 
 #include "ggml.h"
 #include "llama-arch.h"
@@ -1386,6 +1387,11 @@ llm_graph_result * llama_context::process_ubatch(const llama_ubatch & ubatch, ll
 
     auto * res = gf_res_prev.get();
     auto * gf  = res->get_gf();
+
+    // the tier (hot store + CPU cold op) is a decode-only optimization: for
+    // multi-token ubatches it sinks the bulk of MoE work into the CPU cold op.
+    // bypass it during prefill so prompt processing stays on the stock GPU path.
+    llama_expert_tier_set_engage(ubatch.n_tokens == 1);
 
     // the new graph parameters
     // in order to correctly reuse a graph, it's full topology has to be uniquely determined by these parameters

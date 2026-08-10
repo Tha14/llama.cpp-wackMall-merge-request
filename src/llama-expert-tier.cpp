@@ -19,6 +19,12 @@ namespace {
     // returns hot-only results; the fused op (built by end_fused) covers cold.
     bool g_fused_active = false;
 
+    // tier hook is engaged only for single-token (decode) ubatches. prefill
+    // (multi-token) uses the stock GPU path so prompt processing is not sunk
+    // into the CPU cold op. graph build runs on one thread, so a plain
+    // thread_local is safe here.
+    thread_local bool g_engage = true;
+
     // fused path only kicks in for batches up to this many tokens (gated on
     // ids->ne[1]); larger batches fall back to the per-op cold path.
     static int g_tmax = 16;
@@ -42,6 +48,10 @@ void llama_expert_tier_clear() {
 bool llama_expert_tier_has(ggml_tensor * w) {
     std::lock_guard<std::mutex> lk(g_mtx);
     return g_table.find(w) != g_table.end();
+}
+
+void llama_expert_tier_set_engage(bool engage) {
+    g_engage = engage;
 }
 
 // Remap real expert ids through a LUT to slot indices, returning a 2d
@@ -77,6 +87,10 @@ ggml_tensor * llama_expert_tier_build(ggml_context * ctx,
             return nullptr;
         }
         ent = it->second;
+    }
+
+    if (!g_engage) {
+        return nullptr;
     }
 
     const int n_experts     = (int) w->ne[2];
@@ -116,7 +130,7 @@ bool llama_expert_tier_begin_fused(ggml_tensor * gate_w,
                                    ggml_tensor * down_w,
                                    ggml_tensor * ids) {
     g_fused_active = false;
-    if (!gate_w || !up_w || !down_w) {
+    if (!g_engage || !gate_w || !up_w || !down_w) {
         return false;
     }
     if (ids->ne[1] > (int64_t) g_tmax) {

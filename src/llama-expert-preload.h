@@ -31,6 +31,18 @@ namespace llama_expert_preload {
     // (forced OR a CUDA device is present). mirrors the gate in llama-context.cpp.
     bool tier_will_engage();
 
+    // true when the full expert weight set of `model_path` fits in the free
+    // VRAM of the largest GPU. used to keep the cache (and its -cmoe forcing)
+    // off for VRAM-fitting models, where prompt processing should stay on the
+    // GPU. returns false when the file cannot be read (conservative).
+    LLAMA_API bool exps_fit_in_vram(const char * model_path);
+
+    // true when the loader streams exps into its own buffers instead of the
+    // model tensors. off by default: with the tier bypassed for prefill, the
+    // stock path reads the tensor's own data, so streaming would leave those
+    // tensors without valid payloads. force with LLAMA_EXPERT_STREAM.
+    bool stream_enabled();
+
     // backend-agnostic 256-byte alignment for the store's LUT region: some
     // backends (Vulkan) require minStorageBufferOffsetAlignment for get_rows
     // sources. returns the total store bytes (entries + padded LUTs).

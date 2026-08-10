@@ -3,6 +3,7 @@
 #include "ggml.h"
 #include "ggml-backend.h"
 #include "ggml-cpu.h"
+#include "gguf.h"
 
 #include <cstring>
 #include <regex>
@@ -116,6 +117,49 @@ bool tier_will_engage() {
         }
     }
     return false;
+}
+
+bool exps_fit_in_vram(const char * model_path) {
+    if (!model_path || model_path[0] == '\0') {
+        return false;
+    }
+
+    size_t free_vram = 0;
+    for (size_t i = 0; i < ggml_backend_dev_count(); i++) {
+        const ggml_backend_dev_t dev = ggml_backend_dev_get(i);
+        if (dev && ggml_backend_dev_type(dev) == GGML_BACKEND_DEVICE_TYPE_GPU) {
+            size_t free_bytes = 0, total_bytes = 0;
+            ggml_backend_dev_memory(dev, &free_bytes, &total_bytes);
+            if (free_bytes > free_vram) {
+                free_vram = free_bytes;
+            }
+        }
+    }
+    if (free_vram == 0) {
+        return false;
+    }
+
+    // metadata-only read: size the exps tensors straight from the gguf header
+    struct gguf_context * gctx = gguf_init_from_file(model_path, { /*no_alloc=*/ true, /*ctx=*/ nullptr });
+    if (!gctx) {
+        return false;
+    }
+    size_t exps_bytes = 0;
+    const int64_t n_tensors = gguf_get_n_tensors(gctx);
+    for (int64_t i = 0; i < n_tensors; i++) {
+        int il = -1;
+        if (is_exps(gguf_get_tensor_name(gctx, i), il)) {
+            exps_bytes += gguf_get_tensor_size(gctx, i);
+        }
+    }
+    gguf_free(gctx);
+
+    // free VRAM minus a small headroom for the kv cache and copies
+    return exps_bytes > 0 && exps_bytes + 256*1024*1024 <= free_vram;
+}
+
+bool stream_enabled() {
+    return getenv("LLAMA_EXPERT_STREAM") != nullptr;
 }
 
 size_t align_up256(size_t x) {

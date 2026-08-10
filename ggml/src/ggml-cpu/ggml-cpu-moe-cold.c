@@ -305,6 +305,7 @@ void ggml_compute_forward_moe_cold(
                 const char * acol = act_q + (col0[cur_a] + c)*q_ff;
                 float * dst_col = (float *) ((char *) dst->data + rm.i1*dst->nb[1] + (int64_t) rm.i2*dst->nb[2]);
                 for (int64_t j = ir0_start; j < ir0_end; j++) {
+                    PREFETCH(wd + (j + 1)*w_down->nb[1]);
                     float res = 0.0f;
                     vec_dot_d(n_ff, &res, 0, wd + j*w_down->nb[1], 0, acol, 0, 1);
                     dst_col[j] += res;

@@ -1312,11 +1312,12 @@ struct ggml_tensor * llama_model_loader::create_tensor(
     struct ggml_tensor * tensor = ggml_dup_tensor(ctx, &t_meta);
     ggml_set_name(tensor, ggml_get_name(&t_meta));
 
-    // expert tier + no-mmap: the exps data lives in our buffers (GPU store for
-    // the hot experts, host buffer for the cold). give the tensor a valid ghost
-    // buffer so the model allocation skips it and the graph stays satisfied;
-    // the tier and the cold-op hook never read the tensor's own data.
-    if (!use_mmap && llama_expert_preload::tier_will_engage()) {
+    // expert tier + no-mmap + streaming: the exps data lives in our buffers
+    // (GPU store for the hot experts, host buffer for the cold). give the
+    // tensor a valid ghost buffer so the model allocation skips it and the
+    // graph stays satisfied; the tier and the cold-op hook never read the
+    // tensor's own data.
+    if (!use_mmap && llama_expert_preload::stream_enabled()) {
         int il = -1;
         if (llama_expert_preload::is_exps(tn.str().c_str(), il)) {
             static ggml_backend_buffer_t ghost = nullptr;
@@ -1549,9 +1550,9 @@ bool llama_model_loader::load_all_data(
             ggml_backend_name(upload_backend));
     }
 
-    // tier + no-mmap + manual -ehs: stream the startup batch (first S experts
-    // per layer) into a GPU store buffer so those slices never commit RAM.
-    if (!use_mmap && llama_expert_preload::tier_will_engage() && !bufs.empty()) {
+    // tier + no-mmap + streaming: the startup batch (first S experts per layer)
+    // is copied into a GPU store buffer so those slices never commit RAM.
+    if (!use_mmap && llama_expert_preload::stream_enabled() && !bufs.empty()) {
         size_t gpu_total = 0;
         size_t cpu_total = 0;
         int n_entries = 0;
@@ -1640,7 +1641,7 @@ bool llama_model_loader::load_all_data(
 
             if (ggml_backend_buffer_is_host(cur->buffer)) {
                 int il = -1;
-                if (llama_expert_preload::tier_will_engage() && llama_expert_preload::is_exps(ggml_get_name(cur), il)) {
+                if (llama_expert_preload::stream_enabled() && llama_expert_preload::is_exps(ggml_get_name(cur), il)) {
                     // stream the startup batch: first S slices to the GPU store,
                     // the rest (cold) into our host buffer (the model tensor's
                     // data is only a placeholder; the cold-op hook reads ours)

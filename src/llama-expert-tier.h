@@ -42,6 +42,10 @@ void llama_expert_tier_clear();
 // cheap check: is `w` registered? (used so callers can short-circuit lora)
 bool llama_expert_tier_has(ggml_tensor * w);
 
+// enable/disable the tier hook. disabled for prefill (multi-token) ubatches so
+// the stock GPU path is used there; the CPU cold op is decode-only.
+void llama_expert_tier_set_engage(bool engage);
+
 // drop-in hook called from build_lora_mm_id. Returns the combined
 // hot+cold output tensor when `w` is registered; returns nullptr to let the
 // caller fall back to stock ggml_mul_mat_id.

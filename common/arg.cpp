@@ -887,7 +887,9 @@ static bool common_params_parse_ex(int argc, char ** argv, common_params_context
     }
 
     // manual hot store slots need all MoE weights in the CPU (host pointers);
-    // auto-activate -cmoe unless the user already did (or wants autofit slots)
+    // auto-activate -cmoe unless the user already did (or wants autofit slots).
+    // when the exps fully fit in VRAM the cache is pointless and only sinks
+    // prompt processing into CPU, so disable it there (see exps_fit_in_vram).
     if (params.expert_hot_s > 0) {
         bool has_cmoe = false;
         for (const auto & o : params.tensor_buft_overrides) {
@@ -897,8 +899,13 @@ static bool common_params_parse_ex(int argc, char ** argv, common_params_context
             }
         }
         if (!has_cmoe) {
-            params.tensor_buft_overrides.push_back(llm_ffn_exps_cpu_override());
-            LOG_WRN("manually selecting --expert-hot-s slots activates --cmoe (all MoE weights kept in the CPU)\n");
+            if (!getenv("LLAMA_EXPERT_FORCE") && llama_expert_preload::exps_fit_in_vram(params.model.path.c_str())) {
+                LOG_WRN("model MoE weights fit in GPU VRAM; expert cache is OFF (keep prompt processing on the GPU)\n");
+                params.expert_hot_s = 0;
+            } else {
+                params.tensor_buft_overrides.push_back(llm_ffn_exps_cpu_override());
+                LOG_WRN("manually selecting --expert-hot-s slots activates --cmoe (all MoE weights kept in the CPU)\n");
+            }
         }
     }
 
