@@ -6,6 +6,7 @@
 #include "fit.h"
 #include "log.h"
 #include "llama.h"
+#include "llama-expert-preload.h"
 #include "sampling.h"
 #include "speculative.h"
 #include "unicode.h"
@@ -1253,6 +1254,15 @@ common_init_result::common_init_result(common_params & params, bool model_only) 
             // to CPU so the hot store copy reads host pointers (<=> -cmoe).
             params.expert_hot_s = n_expert_hot_s > 0 ? n_expert_hot_s : 0;
             cparams.expert_hot_s = params.expert_hot_s;
+            // compute capability gate (sm_61 regresses; see RFC #25857)
+            const int min_cc = llama_expert_preload::gpu_min_cc(params.expert_gpu);
+            if (params.expert_hot_s > 0 && !getenv("LLAMA_EXPERT_FORCE") &&
+                min_cc > 0 && min_cc < llama_expert_preload::EXPERT_MIN_CC) {
+                LOG_WRN("%s: GPU compute capability %d.%d too old for the expert cache (need sm_70+); expert cache is OFF\n",
+                    __func__, min_cc / 100, (min_cc / 10) % 10);
+                params.expert_hot_s = 0;
+                cparams.expert_hot_s = params.expert_hot_s;
+            }
             if (params.expert_hot_s > 0) {
                 for (auto & o : params.tensor_buft_overrides) {
                     if (o.pattern == nullptr) {

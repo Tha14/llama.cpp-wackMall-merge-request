@@ -36,6 +36,8 @@ GGML_BACKEND_API ggml_backend_buffer_type_t ggml_backend_cuda_host_buffer_type(v
 GGML_BACKEND_API int  ggml_backend_cuda_get_device_count(void);
 GGML_BACKEND_API void ggml_backend_cuda_get_device_description(int device, char * description, size_t description_size);
 GGML_BACKEND_API void ggml_backend_cuda_get_device_memory(int device, size_t * free, size_t * total);
+// compute capability as 100*major + 10*minor (e.g. sm_75 -> 750); 0 on bad device
+GGML_BACKEND_API int  ggml_backend_cuda_get_device_cc(int device);
 
 GGML_BACKEND_API bool ggml_backend_cuda_register_host_buffer(void * buffer, size_t size);
 GGML_BACKEND_API void ggml_backend_cuda_unregister_host_buffer(void * buffer);

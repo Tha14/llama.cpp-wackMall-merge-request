@@ -4,6 +4,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <string>
 
 struct ggml_tensor;
 struct ggml_backend_buffer;
@@ -36,6 +37,24 @@ namespace llama_expert_preload {
     // off for VRAM-fitting models, where prompt processing should stay on the
     // GPU. returns false when the file cannot be read (conservative).
     LLAMA_API bool exps_fit_in_vram(const char * model_path);
+
+    // min compute capability floor (sm_70) for the GPU hot store: below it the
+    // store must not engage (Pascal sm_61 regresses; see RFC #25857). cc is
+    // 100*major+10*minor for NVIDIA CUDA (610, 750, ...); AMD/MUSA offsets are
+    // far above this, so those always pass.
+    static constexpr int EXPERT_MIN_CC = 700;
+
+    // minimum cc (100*major+10*minor) among the CUDA GPU devices that would
+    // host the hot store, honoring expert_gpu pinning (same filter as the
+    // hotstore's gpu_bufts build in llama-context.cpp). returns 0 when no CUDA
+    // device qualifies, i.e. the gate does not apply.
+    LLAMA_API int gpu_min_cc(int expert_gpu);
+
+    // parse the --expert-gpu value: "-1"/"all" -> -1 (all GPUs), a plain
+    // integer -> itself, or a backend device name like CUDA0 -> its index among
+    // the GPU devices (same ordering as gpu_min_cc). throws std::invalid_argument
+    // on an unknown device or a non-GPU device.
+    LLAMA_API int expert_gpu_parse(const std::string & sel);
 
     // true when the loader streams exps into its own buffers instead of the
     // model tensors. off by default: with the tier bypassed for prefill, the

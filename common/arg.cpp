@@ -890,7 +890,10 @@ static bool common_params_parse_ex(int argc, char ** argv, common_params_context
     // auto-activate -cmoe unless the user already did (or wants autofit slots).
     // when the exps fully fit in VRAM the cache is pointless and only sinks
     // prompt processing into CPU, so disable it there (see exps_fit_in_vram).
+    // a GPU below sm_70 (compute capability gate) also disables the cache:
+    // sm_61 regresses decode (see RFC #25857), so the store must not engage.
     if (params.expert_hot_s > 0) {
+        ggml_backend_load_all(); // the fit and cc gates below need the device list
         bool has_cmoe = false;
         for (const auto & o : params.tensor_buft_overrides) {
             if (o.pattern != nullptr && strcmp(o.pattern, LLM_FFN_EXPS_REGEX) == 0) {
@@ -899,8 +902,14 @@ static bool common_params_parse_ex(int argc, char ** argv, common_params_context
             }
         }
         if (!has_cmoe) {
-            if (!getenv("LLAMA_EXPERT_FORCE") && llama_expert_preload::exps_fit_in_vram(params.model.path.c_str())) {
+            const int min_cc = llama_expert_preload::gpu_min_cc(params.expert_gpu);
+            const bool forced = getenv("LLAMA_EXPERT_FORCE") != nullptr;
+            if (!forced && llama_expert_preload::exps_fit_in_vram(params.model.path.c_str())) {
                 LOG_WRN("model MoE weights fit in GPU VRAM; expert cache is OFF (keep prompt processing on the GPU)\n");
+                params.expert_hot_s = 0;
+            } else if (!forced && min_cc > 0 && min_cc < llama_expert_preload::EXPERT_MIN_CC) {
+                LOG_WRN("GPU compute capability %d.%d too old for the expert cache (need sm_70+); expert cache is OFF\n",
+                    min_cc / 100, (min_cc / 10) % 10);
                 params.expert_hot_s = 0;
             } else {
                 params.tensor_buft_overrides.push_back(llm_ffn_exps_cpu_override());
@@ -2780,10 +2789,10 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         }
     ).set_env("LLAMA_ARG_EXPERT_SIDECAR"));
     add_opt(common_arg(
-        {"--expert-gpu"}, "N",
-        "put the expert store on this GPU index (default: -1 = all GPUs)",
-        [](common_params & params, int value) {
-            params.expert_gpu = value;
+        {"--expert-gpu"}, "N|NAME",
+        "put the expert store on this GPU: index, or a device name like CUDA0 (default: -1 = all GPUs)",
+        [](common_params & params, const std::string & value) {
+            params.expert_gpu = llama_expert_preload::expert_gpu_parse(value);
         }
     ).set_env("LLAMA_ARG_EXPERT_GPU"));
     GGML_ASSERT(params.n_gpu_layers < 0); // string_format would need to be extended for a default >= 0

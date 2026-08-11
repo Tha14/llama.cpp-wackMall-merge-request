@@ -181,7 +181,7 @@ jobs:
             -DGGML_CUDA=ON ^
             -DLLAMA_BUILD_BORINGSSL=ON ^
             -DGGML_CUDA_CUB_3DOT2=ON ^
-            -DCMAKE_CUDA_ARCHITECTURES="61;75"
+            -DCMAKE_CUDA_ARCHITECTURES="61-real;75-real"
           set /A NINJA_JOBS=%NUMBER_OF_PROCESSORS%-1
           cmake --build build --config Release -j %NINJA_JOBS% --target ggml-cuda
 

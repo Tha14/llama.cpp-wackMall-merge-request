@@ -65,7 +65,8 @@ jobs:
             -DGGML_CPU_ALL_VARIANTS=ON ^
             -DGGML_CUDA=ON ^
             -DGGML_RPC=ON ^
-            -DGGML_CUDA_CUB_3DOT2=ON
+            -DGGML_CUDA_CUB_3DOT2=ON ^
+            -DCMAKE_CUDA_ARCHITECTURES="61-real;75-real"
           set /A NINJA_JOBS=%NUMBER_OF_PROCESSORS%-1
           cmake --build build --config Release -j %NINJA_JOBS% -t ggml
           cmake --build build --config Release

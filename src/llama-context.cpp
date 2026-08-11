@@ -496,6 +496,7 @@ llama_context::llama_context(
         // enable the GPU hot store on any GPU backend (CUDA, Vulkan, ROCm,
         // SYCL, Metal, ...).
         bool cache_enabled = false;
+        bool cc_blocked = false;
         std::vector<ggml_backend_buffer_type_t> gpu_bufts;
         for (auto & backend : backends) {
             ggml_backend_dev_t dev = ggml_backend_get_device(backend.get());
@@ -509,10 +510,19 @@ llama_context::llama_context(
             gpu_bufts.push_back(ggml_backend_get_default_buffer_type(backend.get()));
         }
         if (!gpu_bufts.empty()) {
-            cache_enabled = expert_hotstore->allocate(gpu_bufts, model.tensor_split(), (int) gpu_bufts.size());
+            // compute capability floor: never host the store on too-old GPUs
+            // (sm_61 regresses decode; see RFC #25857). LLAMA_EXPERT_FORCE bypasses.
+            const int min_cc = llama_expert_preload::gpu_min_cc(params.expert_gpu);
+            if (!getenv("LLAMA_EXPERT_FORCE") && min_cc > 0 && min_cc < llama_expert_preload::EXPERT_MIN_CC) {
+                LLAMA_LOG_WARN("%s: expert cache is OFF: GPU compute capability %d.%d below sm_70 (need sm_70+)\n",
+                    __func__, min_cc / 100, (min_cc / 10) % 10);
+                cc_blocked = true;
+            } else {
+                cache_enabled = expert_hotstore->allocate(gpu_bufts, model.tensor_split(), (int) gpu_bufts.size());
+            }
         }
         // launch hint: cache did not engage, usually no GPU accelerator
-        if (!cache_enabled) {
+        if (!cache_enabled && !cc_blocked) {
             LLAMA_LOG_WARN("%s: expert cache is OFF: %d slots requested but no GPU backend in use\n",
                 __func__, params.expert_hot_s);
         }

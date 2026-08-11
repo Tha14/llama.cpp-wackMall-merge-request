@@ -5,8 +5,10 @@
 #include "ggml-cpu.h"
 #include "gguf.h"
 
+#include <algorithm>
 #include <cstring>
 #include <regex>
+#include <stdexcept>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -156,6 +158,85 @@ bool exps_fit_in_vram(const char * model_path) {
 
     // free VRAM minus a small headroom for the kv cache and copies
     return exps_bytes > 0 && exps_bytes + 256*1024*1024 <= free_vram;
+}
+
+int gpu_min_cc(int expert_gpu) {
+    int min_cc = 0;
+    int gpu_idx = 0; // index among GPU (non-CPU/non-ACCEL) devices, like the hotstore
+    for (size_t i = 0; i < ggml_backend_dev_count(); ++i) {
+        const ggml_backend_dev_t dev = ggml_backend_dev_get(i);
+        if (!dev) {
+            continue;
+        }
+        const enum ggml_backend_dev_type type = ggml_backend_dev_type(dev);
+        if (type == GGML_BACKEND_DEVICE_TYPE_CPU || type == GGML_BACKEND_DEVICE_TYPE_ACCEL) {
+            continue;
+        }
+        if (expert_gpu >= 0 && gpu_idx != expert_gpu) {
+            gpu_idx++;
+            continue; // store pinned to a specific GPU: skip the others
+        }
+        gpu_idx++;
+
+        // only the CUDA backend exposes cc; other GPU backends add no constraint
+        const ggml_backend_reg_t reg = ggml_backend_dev_backend_reg(dev);
+        if (!reg) {
+            continue;
+        }
+        typedef int (* get_cc_fn)(int);
+        const get_cc_fn get_cc = (get_cc_fn) ggml_backend_reg_get_proc_address(reg, "ggml_backend_cuda_get_device_cc");
+        if (!get_cc) {
+            continue;
+        }
+        // find this device's index within its backend reg
+        for (size_t j = 0; j < ggml_backend_reg_dev_count(reg); ++j) {
+            if (ggml_backend_reg_dev_get(reg, j) == dev) {
+                const int cc = get_cc((int) j);
+                if (cc > 0 && (min_cc == 0 || cc < min_cc)) {
+                    min_cc = cc;
+                }
+                break;
+            }
+        }
+    }
+    return min_cc;
+}
+
+int expert_gpu_parse(const std::string & sel) {
+    if (sel.empty() || sel == "-1" || sel == "all") {
+        return -1;
+    }
+    // plain integer, optionally negative (any negative = all GPUs, like -1)
+    const bool digits_only = std::all_of(sel.begin(), sel.end(), [](char c) { return c >= '0' && c <= '9'; });
+    const bool neg_int = sel.size() > 1 && sel[0] == '-' &&
+        std::all_of(sel.begin() + 1, sel.end(), [](char c) { return c >= '0' && c <= '9'; });
+    if (digits_only || neg_int) {
+        const int v = std::stoi(sel);
+        return v < 0 ? -1 : v;
+    }
+
+    // backend device name like CUDA0, CUDA1, Vulkan0, ...
+    ggml_backend_load_all();
+    const ggml_backend_dev_t dev = ggml_backend_dev_by_name(sel.c_str());
+    if (!dev) {
+        throw std::invalid_argument("invalid --expert-gpu device: " + sel);
+    }
+    int gpu_idx = 0;
+    for (size_t i = 0; i < ggml_backend_dev_count(); ++i) {
+        const ggml_backend_dev_t d = ggml_backend_dev_get(i);
+        if (!d) {
+            continue;
+        }
+        const enum ggml_backend_dev_type type = ggml_backend_dev_type(d);
+        if (type == GGML_BACKEND_DEVICE_TYPE_CPU || type == GGML_BACKEND_DEVICE_TYPE_ACCEL) {
+            continue;
+        }
+        if (d == dev) {
+            return gpu_idx;
+        }
+        gpu_idx++;
+    }
+    throw std::invalid_argument("device is not a GPU: " + sel);
 }
 
 bool stream_enabled() {
