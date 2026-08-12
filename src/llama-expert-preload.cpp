@@ -272,23 +272,22 @@ const uint8_t * cpu_slice(size_t idx, int expert) {
 }
 
 static void release_pages(void * ptr, size_t len) {
+    (void) ptr;
+    (void) len;
 #ifdef _WIN32
-    SYSTEM_INFO si;
-    GetSystemInfo(&si);
-    const size_t page = si.dwPageSize;
+    // Windows maps the gguf tensor payloads into a file mapping; VirtualFree
+    // with MEM_RESET on file-backed pages is undefined and faults later in
+    // memcpy (VCRUNTIME access violation). Keep the RAM copy on Windows.
+    return;
 #else
     const long page = sysconf(_SC_PAGESIZE);
-#endif
     const uintptr_t base   = (uintptr_t) ptr;
     const uintptr_t start  = (base + (uintptr_t) page - 1) & ~((uintptr_t) page - 1);
     const uintptr_t end    = (base + len) & ~((uintptr_t) page - 1);
     if (start < end) {
-#ifdef _WIN32
-        VirtualFree((LPVOID) start, end - start, MEM_RESET);
-#else
         madvise((void *) start, end - start, MADV_DONTNEED);
-#endif
     }
+#endif
 }
 
 void free_cpu_slice(size_t idx, int expert) {
