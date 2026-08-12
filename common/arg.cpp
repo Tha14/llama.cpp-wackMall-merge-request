@@ -888,12 +888,10 @@ static bool common_params_parse_ex(int argc, char ** argv, common_params_context
 
     // manual hot store slots need all MoE weights in the CPU (host pointers);
     // auto-activate -cmoe unless the user already did (or wants autofit slots).
-    // when the exps fully fit in VRAM the cache is pointless and only sinks
-    // prompt processing into CPU, so disable it there (see exps_fit_in_vram).
-    // a GPU below sm_70 (compute capability gate) also disables the cache:
-    // sm_61 regresses decode (see RFC #25857), so the store must not engage.
+    // a GPU below sm_70 (compute capability gate) disables the cache: sm_61
+    // regresses decode (see RFC #25857), so the store must not engage.
     if (params.expert_hot_s > 0) {
-        ggml_backend_load_all(); // the fit and cc gates below need the device list
+        ggml_backend_load_all(); // the cc gate below needs the device list
         bool has_cmoe = false;
         for (const auto & o : params.tensor_buft_overrides) {
             if (o.pattern != nullptr && strcmp(o.pattern, LLM_FFN_EXPS_REGEX) == 0) {
@@ -904,10 +902,7 @@ static bool common_params_parse_ex(int argc, char ** argv, common_params_context
         if (!has_cmoe) {
             const int min_cc = llama_expert_preload::gpu_min_cc(params.expert_gpu);
             const bool forced = getenv("LLAMA_EXPERT_FORCE") != nullptr;
-            if (!forced && llama_expert_preload::exps_fit_in_vram(params.model.path.c_str())) {
-                LOG_WRN("model MoE weights fit in GPU VRAM; expert cache is OFF (keep prompt processing on the GPU)\n");
-                params.expert_hot_s = 0;
-            } else if (!forced && min_cc > 0 && min_cc < llama_expert_preload::EXPERT_MIN_CC) {
+            if (!forced && min_cc > 0 && min_cc < llama_expert_preload::EXPERT_MIN_CC) {
                 LOG_WRN("GPU compute capability %d.%d too old for the expert cache (need sm_70+); expert cache is OFF\n",
                     min_cc / 100, (min_cc / 10) % 10);
                 params.expert_hot_s = 0;
@@ -2780,6 +2775,14 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
             params.expert_move_mode = value;
         }
     ).set_env("LLAMA_ARG_EXPERT_MOVE_MODE"));
+    add_opt(common_arg(
+        {"--expert-swaps-per-turn"}, "N",
+        "model-wide expert swaps allowed per sync turn (default: 0 = unlimited); "
+        ">0 enables an ultra-low-bandwidth mode with a fixed 32-token turn",
+        [](common_params & params, int value) {
+            params.expert_swaps_per_turn = value;
+        }
+    ).set_env("LLAMA_ARG_EXPERT_SWAPS_PER_TURN"));
     add_opt(common_arg(
         {"--expert-sidecar"},
         {},

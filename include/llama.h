@@ -416,6 +416,7 @@ extern "C" {
         bool  expert_sidecar;         // load/save the expert heatmap sidecar (<model>.tier)
         int   expert_move_mode;            // expert store mode: 0 = auto, 1 = copy, 2 = move
         int   expert_gpu;             // put the expert store on this GPU index (-1 = all GPUs)
+        int   expert_swaps_per_turn;  // model-wide expert swaps per sync turn; 0 = unlimited (low-bandwidth mode)
 
         // a source/target/parent context
         // can be utilized in various ways, for example by sharing results or llama_memory between 2 contexts

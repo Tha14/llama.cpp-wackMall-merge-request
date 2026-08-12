@@ -3,7 +3,6 @@
 #include "ggml.h"
 #include "ggml-backend.h"
 #include "ggml-cpu.h"
-#include "gguf.h"
 
 #include <algorithm>
 #include <cstring>
@@ -39,22 +38,17 @@ static long long pread(int fd, void * buf, size_t n, long long off) {
 
 namespace llama_expert_preload {
 
+    int index_of(const ggml_tensor * src);
+
 namespace {
     // matches an expert weight tensor, e.g. blk.0.ffn_gate_exps.weight
     const std::regex g_re_exps("blk\\.(\\d+)\\.ffn_(up|down|gate|gate_up)_(ch|)exps\\.weight");
 
     int g_slots = 0;
 
-    struct ggml_backend_buffer * g_gpu_buf = nullptr;
-    struct ggml_context * g_ctx = nullptr; // temp context for the store write tensors
-    uint8_t * g_cpu_buf = nullptr;         // host buffer for the cold experts
-    size_t g_cpu_size = 0;
     std::vector<entry> g_entries;
     std::unordered_map<const ggml_tensor *, size_t> g_src_idx; // src -> entry index
-    std::vector<std::vector<uint64_t>> g_addrs; // [entry][expert] -> host address
     std::vector<std::vector<uint64_t>> g_hashes; // [entry][expert] -> gguf FNV-1a(1024B)
-    size_t g_gpu_cursor = 0; // next free offset in the store
-    size_t g_cpu_cursor = 0; // next free offset in the host buffer
 
     static uint64_t fnv1a(const uint8_t * p, size_t n) {
         uint64_t h = 0xcbf29ce484222325ULL;
@@ -68,17 +62,17 @@ namespace {
     std::string g_path;
     int g_fd = -1;
 
-    // C callback for the ggml cold op: resolve a cold expert's address from the
-    // table (set at write time, so it always matches where the slice landed)
+    // C callback for the ggml cold op: resolve a cold expert's address from
+    // the tensor payload (the tensors ARE the cold store)
     const uint8_t * preload_slice_cb(const struct ggml_tensor * src0, int expert) {
-        if (!g_cpu_buf || !src0 || expert < 0) {
+        if (!src0 || expert < 0) {
             return nullptr;
         }
         const int i = index_of(src0);
-        if (i < 0 || expert >= (int) g_addrs[i].size()) {
+        if (i < 0) {
             return nullptr;
         }
-        return (const uint8_t *) (uintptr_t) g_addrs[i][expert];
+        return cpu_slice((size_t) i, expert);
     }
 }
 
@@ -106,58 +100,6 @@ LLAMA_API void set_no_evict(bool no_evict) {
 
 bool get_no_evict() {
     return g_no_evict;
-}
-
-bool tier_will_engage() {
-    if (g_slots <= 0) {
-        return false;
-    }
-    for (size_t i = 0; i < ggml_backend_dev_count(); i++) {
-        const ggml_backend_dev_t dev = ggml_backend_dev_get(i);
-        if (dev && ggml_backend_dev_type(dev) == GGML_BACKEND_DEVICE_TYPE_GPU) {
-            return true; // any GPU backend (CUDA, Vulkan, ROCm, SYCL, Metal, ...)
-        }
-    }
-    return false;
-}
-
-bool exps_fit_in_vram(const char * model_path) {
-    if (!model_path || model_path[0] == '\0') {
-        return false;
-    }
-
-    size_t free_vram = 0;
-    for (size_t i = 0; i < ggml_backend_dev_count(); i++) {
-        const ggml_backend_dev_t dev = ggml_backend_dev_get(i);
-        if (dev && ggml_backend_dev_type(dev) == GGML_BACKEND_DEVICE_TYPE_GPU) {
-            size_t free_bytes = 0, total_bytes = 0;
-            ggml_backend_dev_memory(dev, &free_bytes, &total_bytes);
-            if (free_bytes > free_vram) {
-                free_vram = free_bytes;
-            }
-        }
-    }
-    if (free_vram == 0) {
-        return false;
-    }
-
-    // metadata-only read: size the exps tensors straight from the gguf header
-    struct gguf_context * gctx = gguf_init_from_file(model_path, { /*no_alloc=*/ true, /*ctx=*/ nullptr });
-    if (!gctx) {
-        return false;
-    }
-    size_t exps_bytes = 0;
-    const int64_t n_tensors = gguf_get_n_tensors(gctx);
-    for (int64_t i = 0; i < n_tensors; i++) {
-        int il = -1;
-        if (is_exps(gguf_get_tensor_name(gctx, i), il)) {
-            exps_bytes += gguf_get_tensor_size(gctx, i);
-        }
-    }
-    gguf_free(gctx);
-
-    // free VRAM minus a small headroom for the kv cache and copies
-    return exps_bytes > 0 && exps_bytes + 256*1024*1024 <= free_vram;
 }
 
 int gpu_min_cc(int expert_gpu) {
@@ -239,26 +181,6 @@ int expert_gpu_parse(const std::string & sel) {
     throw std::invalid_argument("device is not a GPU: " + sel);
 }
 
-bool stream_enabled() {
-    return getenv("LLAMA_EXPERT_STREAM") != nullptr;
-}
-
-size_t align_up256(size_t x) {
-    const size_t align = 256;
-    return (x + align - 1) & ~(align - 1);
-}
-
-size_t store_total_bytes(size_t entries_bytes, int n_layers, int n_experts, int slots) {
-    size_t off = align_up256(entries_bytes);
-    for (int il = 0; il < n_layers; il++) {
-        off = align_up256(off);
-        off += align_up256((size_t) n_experts * sizeof(int32_t));
-        off = align_up256(off);
-        off += align_up256((size_t) (slots + 1) * sizeof(float));
-    }
-    return off;
-}
-
 bool is_exps(const char * name, int & layer_idx) {
     if (!name) {
         return false;
@@ -271,75 +193,26 @@ bool is_exps(const char * name, int & layer_idx) {
     return true;
 }
 
-void begin(struct ggml_backend_buffer_type * buft, size_t gpu_bytes, size_t cpu_bytes, int max_entries) {
-    if (g_gpu_buf || g_cpu_buf) {
-        return; // load_all_data can run more than once (fit estimate + real load)
+int register_tensor(const ggml_tensor * src, size_t plane_bytes, int n_experts,
+                    size_t file_off, int fd, const uint8_t * data) {
+    if (!src || !data || plane_bytes == 0 || n_experts <= 0) {
+        return -1; // GPU-resident or degenerate tensor: not host-backed
     }
-    g_gpu_buf = ggml_backend_buft_alloc_buffer(buft, gpu_bytes);
-    // zero the whole store up front: the sentinel plane and any unwritten gaps
-    // would otherwise carry per-launch garbage into the graph output (Vulkan)
-    ggml_backend_buffer_clear(g_gpu_buf, 0);
-    g_ctx = ggml_init({ ggml_tensor_overhead() * (max_entries + 8), nullptr, true });
-    g_cpu_buf = (uint8_t *) malloc(cpu_bytes);
-    g_cpu_size = cpu_bytes;
-    g_entries.clear();
-    g_src_idx.clear();
-    g_addrs.clear();
-    g_hashes.clear();
-    g_gpu_cursor = 0;
-    g_cpu_cursor = 0;
-}
-
-size_t register_tensor(const ggml_tensor * src, size_t plane_bytes, int n_experts, int startup,
-                       size_t file_off, int fd) {
     for (size_t i = 0; i < g_entries.size(); i++) {
         if (g_entries[i].src == src) {
             g_entries[i].fd = fd; // refresh: the file may be reopened between passes
-            return i; // already registered (second load pass)
+            return (int) i; // already registered (second load pass)
         }
     }
-    const size_t gpu_off = g_gpu_cursor;
-    const size_t cpu_off = g_cpu_cursor;
-    g_entries.push_back({src, plane_bytes, gpu_off, cpu_off, file_off, fd, n_experts, startup});
+    g_entries.push_back({src, plane_bytes, file_off, fd, n_experts});
     g_src_idx[src] = g_entries.size() - 1;
-    g_addrs.emplace_back((size_t) n_experts, 0);
     g_hashes.emplace_back((size_t) n_experts, 0);
-    g_gpu_cursor += (size_t) (startup + 1) * plane_bytes;
-    g_cpu_cursor += (size_t) n_experts * plane_bytes; // all experts, cold committed at load
-    return g_entries.size() - 1;
-}
-
-bool write_entry(size_t idx, const uint8_t * data, size_t nbytes) {
-    if (idx >= g_entries.size() || !data) {
-        return false;
+    const size_t chunk = plane_bytes < 1024 ? plane_bytes : 1024;
+    for (int ex = 0; ex < n_experts; ex++) {
+        g_hashes.back()[ex] = fnv1a(data + (size_t) ex * plane_bytes, chunk);
     }
-    const entry & e = g_entries[idx];
-    if (nbytes < (size_t) e.startup * e.plane_bytes) {
-        return false;
-    }
-    // stream the startup slices into the store buffer at load (fast startup,
-    // no token-1 file reads). the store adopts this buffer and re-allocates
-    // its dst tensors at the same gpu_offset; the scratch tensor below dies
-    // with g_ctx at take_buffer(). the cold op's slice callback ignores the
-    // startup experts (they are GPU-counted), so no host copy is needed.
-    if (g_gpu_buf && g_ctx) {
-        ggml_tensor * t = ggml_new_tensor_1d(g_ctx, GGML_TYPE_I8, e.plane_bytes);
-        uint8_t * base = (uint8_t *) ggml_backend_buffer_get_base(g_gpu_buf);
-        for (int ex = 0; ex < e.startup; ex++) {
-            uint8_t * dst = base + e.gpu_offset + (size_t) ex * e.plane_bytes;
-            if (ex == 0) {
-                ggml_backend_tensor_alloc(g_gpu_buf, t, dst);
-            } else {
-                t->data = dst; // manual view into the adopted store buffer
-            }
-            ggml_backend_tensor_set(t, data + (size_t) ex * e.plane_bytes, 0, e.plane_bytes);
-        }
-    }
-    const size_t chunk = e.plane_bytes < 1024 ? e.plane_bytes : 1024;
-    for (int ex = 0; ex < e.startup; ex++) {
-        g_hashes[idx][ex] = fnv1a(data + (size_t) ex * e.plane_bytes, chunk);
-    }
-    return true;
+    ggml_mmid_cold_set_slice_fn(preload_slice_cb);
+    return (int) g_entries.size() - 1;
 }
 
 bool read_expert(size_t idx, int expert, void * out, size_t n) {
@@ -353,50 +226,6 @@ bool read_expert(size_t idx, int expert, void * out, size_t n) {
     const long long got = pread(g_fd >= 0 ? g_fd : e.fd, out, n,
         (long long) (e.file_off + (size_t) expert * e.plane_bytes));
     return got == (long long) n;
-}
-
-bool write_cold(size_t idx, const uint8_t * data, size_t nbytes) {
-    if (idx >= g_entries.size() || !g_cpu_buf || !data) {
-        fprintf(stderr, "write_cold: FAIL idx=%zu cpu_buf=%p data=%p nbytes=%zu\n",
-            idx, (void *) g_cpu_buf, (const void *) data, nbytes);
-        return false;
-    }
-    const entry & e = g_entries[idx];
-    const size_t dst = e.cpu_offset + (size_t) e.startup * e.plane_bytes;
-    if (dst + nbytes > g_cpu_size) {
-        fprintf(stderr, "write_cold: OUT OF BOUNDS\n");
-        return false;
-    }
-    std::memcpy(g_cpu_buf + dst, data, nbytes);
-    const size_t chunk = e.plane_bytes < 1024 ? e.plane_bytes : 1024;
-    for (int ex = e.startup; ex < e.n_experts; ex++) {
-        g_addrs[idx][ex] = (uint64_t) (uintptr_t) (g_cpu_buf + e.cpu_offset + (size_t) ex * e.plane_bytes);
-        g_hashes[idx][ex] = fnv1a(data + (size_t) (ex - e.startup) * e.plane_bytes, chunk);
-    }
-    if (getenv("LLAMA_EXPERT_DEBUG") && idx == 0) {
-        fprintf(stderr, "write_cold: idx0 %s first bytes: %02x %02x %02x %02x\n",
-            e.src->name, g_cpu_buf[dst], g_cpu_buf[dst+1], g_cpu_buf[dst+2], g_cpu_buf[dst+3]);
-    }
-    ggml_mmid_cold_set_slice_fn(preload_slice_cb);
-    return true;
-}
-
-struct ggml_backend_buffer * take_buffer() {
-    struct ggml_backend_buffer * b = g_gpu_buf;
-    g_gpu_buf = nullptr;
-    if (g_ctx) {
-        ggml_free(g_ctx);
-        g_ctx = nullptr;
-    }
-    return b;
-}
-
-size_t num_entries() {
-    return g_entries.size();
-}
-
-const entry * entry_at(size_t idx) {
-    return idx < g_entries.size() ? &g_entries[idx] : nullptr;
 }
 
 int index_of(const ggml_tensor * src) {
@@ -427,19 +256,19 @@ uint64_t expected_hash(const ggml_tensor * src, int expert) {
     return g_hashes[idx][expert];
 }
 
-size_t entries_size() {
-    return g_gpu_cursor;
-}
-
 const uint8_t * cpu_slice(size_t idx, int expert) {
-    if (idx >= g_entries.size() || !g_cpu_buf) {
+    if (idx >= g_entries.size() || !g_entries[idx].src) {
         return nullptr;
     }
     const entry & e = g_entries[idx];
     if (expert < 0 || expert >= e.n_experts) {
         return nullptr;
     }
-    return g_cpu_buf + e.cpu_offset + (size_t) expert * e.plane_bytes;
+    const uint8_t * data = (const uint8_t *) ggml_get_data(e.src);
+    if (!data) {
+        return nullptr;
+    }
+    return data + (size_t) expert * e.plane_bytes;
 }
 
 static void release_pages(void * ptr, size_t len) {
@@ -463,47 +292,39 @@ static void release_pages(void * ptr, size_t len) {
 }
 
 void free_cpu_slice(size_t idx, int expert) {
-    if (idx >= g_entries.size() || !g_cpu_buf) {
+    if (idx >= g_entries.size() || !g_entries[idx].src) {
         return;
     }
     const entry & e = g_entries[idx];
     if (expert < 0 || expert >= e.n_experts) {
         return;
     }
-    release_pages(g_cpu_buf + e.cpu_offset + (size_t) expert * e.plane_bytes, e.plane_bytes);
+    uint8_t * data = (uint8_t *) ggml_get_data(e.src);
+    if (!data) {
+        return;
+    }
+    release_pages(data + (size_t) expert * e.plane_bytes, e.plane_bytes);
 }
 
 void set_cpu_slice(size_t idx, int expert, const uint8_t * data) {
-    if (idx >= g_entries.size() || !g_cpu_buf || !data) {
+    if (idx >= g_entries.size() || !g_entries[idx].src || !data) {
         return;
     }
     const entry & e = g_entries[idx];
     if (expert < 0 || expert >= e.n_experts) {
         return;
     }
-    std::memcpy(g_cpu_buf + e.cpu_offset + (size_t) expert * e.plane_bytes, data, e.plane_bytes);
-    g_addrs[idx][expert] = (uint64_t) (uintptr_t) (g_cpu_buf + e.cpu_offset + (size_t) expert * e.plane_bytes);
+    uint8_t * dst = (uint8_t *) ggml_get_data(e.src);
+    if (!dst) {
+        return;
+    }
+    std::memcpy(dst + (size_t) expert * e.plane_bytes, data, e.plane_bytes);
 }
 
 void clear() {
-    if (g_gpu_buf) {
-        ggml_backend_buffer_free(g_gpu_buf);
-        g_gpu_buf = nullptr;
-    }
-    if (g_ctx) {
-        ggml_free(g_ctx);
-        g_ctx = nullptr;
-    }
-    if (g_cpu_buf) {
-        free(g_cpu_buf);
-        g_cpu_buf = nullptr;
-    }
-    g_cpu_size = 0;
     g_entries.clear();
     g_src_idx.clear();
-    g_addrs.clear();
-    g_gpu_cursor = 0;
-    g_cpu_cursor = 0;
+    g_hashes.clear();
 }
 
 } // namespace llama_expert_preload

@@ -532,6 +532,7 @@ struct common_params {
     int   expert_dwell           = 0;    // minimum updates a resident slot must keep before a swap
     int   expert_pin_pct         = -1;   // percent of cold experts to keep pinned (madvise); -1 = auto
     int   expert_move_mode            = 0;    // expert store mode: 0 = auto, 1 = copy, 2 = move
+    int   expert_swaps_per_turn       = 0;    // model-wide expert swaps per sync turn (0 = unlimited)
     bool  expert_sidecar         = false; // load/save the expert heatmap sidecar (<model>.tier)
     int   expert_gpu             = -1;   // expert store GPU index, resolved from --expert-gpu (index or device name like CUDA0; -1 = all GPUs)
     bool    offline                    = false;

@@ -1723,6 +1723,7 @@ struct llama_context_params common_context_params_to_llama(const common_params &
     cparams.expert_move_mode            = params.expert_move_mode;
     cparams.expert_sidecar         = params.expert_sidecar;
     cparams.expert_gpu             = params.expert_gpu;
+    cparams.expert_swaps_per_turn  = params.expert_swaps_per_turn;
     cparams.model_path             = params.model.path.c_str();
 
     return cparams;

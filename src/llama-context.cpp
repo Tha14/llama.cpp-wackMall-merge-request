@@ -492,7 +492,8 @@ llama_context::llama_context(
         expert_hotstore = std::make_unique<llama_expert_hotstore>(
             &model, hparams.n_layer(), hparams.n_expert,
             params.expert_hot_s, sync_period,
-            params.expert_hyst, params.expert_dwell, params.expert_move_mode);
+            params.expert_hyst, params.expert_dwell, params.expert_move_mode,
+            params.expert_swaps_per_turn);
         // enable the GPU hot store on any GPU backend (CUDA, Vulkan, ROCm,
         // SYCL, Metal, ...).
         bool cache_enabled = false;
@@ -1454,21 +1455,35 @@ llm_graph_result * llama_context::process_ubatch(const llama_ubatch & ubatch, ll
     }
 
     // the store fill is deferred to the first token: copy the startup batch
-    // from the gguf file (sequentially, hash-verified) so the graph never
-    // computes against an unverified or load-time-corrupted store.
+    // from the tensor payloads (sequentially, hash-verified at the next sync)
+    // so the graph never computes against an unverified or corrupted store.
     if (expert_heatmap && expert_hotstore && !expert_hotstore->is_filled) {
         expert_hotstore->copy_top_s(*expert_heatmap);
+        // move mode: the hot rows now live on the GPU, release their RAM pages
+        expert_hotstore->begin_moves();
+    }
+
+    // a prefill after moves have started bypasses the tier; the stock path
+    // reads the tensor payloads, so restore the released hot rows from disk.
+    if (expert_heatmap && expert_hotstore && expert_hotstore->moves_started && ubatch.n_tokens > 1) {
+        expert_hotstore->restore_hot_rows();
     }
 
     if (expert_hotstore) {
         expert_hotstore->reset_counts(); // zero the cold-op tallies for this token
     }
 
+    const auto t_compute_us = ggml_time_us();
     const auto status = graph_compute(res->get_gf(), ubatch.n_tokens > 1);
     if (status != GGML_STATUS_SUCCESS) {
         LLAMA_LOG_ERROR("%s: failed to compute graph, compute status: %d\n", __func__, status);
         ret = status;
         return nullptr;
+    }
+
+    // wall-clock feed for the resync cadence (decode compute time)
+    if (expert_hotstore && ubatch.n_tokens == 1) {
+        expert_hotstore->note_decode(ggml_time_us() - t_compute_us);
     }
 
     // cold-op counts feed the heatmap directly (no D2H readback, no sync).
@@ -3667,6 +3682,7 @@ llama_context_params llama_context_default_params() {
         /*.expert_move_mode                 =*/ 0,
         /*.expert_sidecar              =*/ false,
         /*.expert_gpu                  =*/ -1,
+        /*.expert_swaps_per_turn       =*/ 0,
         /*.ctx_other                   =*/ nullptr,
     };
 

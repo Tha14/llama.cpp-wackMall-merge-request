@@ -76,7 +76,7 @@ static const std::regex g_re_exps_weight("blk\\.(\\d+)\\.ffn_(up|down|gate|gate_
 
 llama_expert_hotstore::llama_expert_hotstore(
         const llama_model * model, int n_layers, int n_experts, int hot_s, int sync_period,
-        float hyst, int dwell, int mode) :
+        float hyst, int dwell, int mode, int swaps_per_turn) :
     n_layers(n_layers),
     n_experts(n_experts),
     hot_s(hot_s),
@@ -84,7 +84,8 @@ llama_expert_hotstore::llama_expert_hotstore(
     sync_period(sync_period),
     hyst(hyst),
     dwell(dwell),
-    mode(mode) {
+    mode(mode),
+    swaps_per_turn(swaps_per_turn) {
     if (n_layers <= 0) {
         return;
     }
@@ -97,7 +98,11 @@ llama_expert_hotstore::llama_expert_hotstore(
         std::smatch m;
         if (std::regex_search(name, m, g_re_exps_weight)) {
             const int il = std::stoi(m[1].str());
-            if (il >= 0 && il < n_layers && tensor->ne[2] > 0) {
+            // host-resident filter: an exps tensor overridden onto a GPU device
+            // (e.g. override-tensor=...=CUDA1) has no host payload to copy from
+            // — it is skipped and that layer runs the stock GPU path.
+            const bool host = tensor->buffer == nullptr || ggml_backend_buffer_is_host(tensor->buffer);
+            if (il >= 0 && il < n_layers && tensor->ne[2] > 0 && host) {
                 // a slot holds nbytes/n_experts of this tensor
                 bytes_per_slot[il] += ggml_nbytes(tensor) / (size_t) tensor->ne[2];
                 entries.push_back({il, tensor, {}});
@@ -114,66 +119,60 @@ llama_expert_hotstore::llama_expert_hotstore(
 
     // resolve mode: 1 = copy, 2 = move, 0 = auto. copy keeps the RAM copy of
     // promoted experts (needs the full exps set resident); move frees it
-    // (RAM-tight). mmap exps are file-backed page cache (kernel-reclaimable),
-    // so copy is always right there; the RAM check only matters on no-mmap.
+    // (RAM-tight). exps tensors are always host-resident (the -cmoe override
+    // puts them on a CPU buffer even with mmap), so the RAM check decides.
     if (mode == 1) {
         copy_mode = true;
     } else if (mode == 2) {
         copy_mode = false;
     } else if (!copy_mode) {
-        const bool mmap_mode = !entries.empty() && llama_expert_preload::index_of(entries[0].src) < 0;
-        if (mmap_mode) {
-            copy_mode = true;
-            fprintf(stderr, "hotstore: copy mode (mmap: exps are file-backed page cache)\n");
-        } else {
-            int64_t exps_bytes = 0;
-            for (int il = 0; il < n_layers; il++) {
-                exps_bytes += bytes_per_slot[il];
-            }
-            exps_bytes *= n_experts; // full exps set: per-slot bytes x experts per layer
-            // available RAM: MemAvailable includes reclaimable page cache;
-            // _SC_AVPHYS_PAGES only counts truly-free pages and underreports
-            int64_t free_ram = 0;
+        int64_t exps_bytes = 0;
+        for (int il = 0; il < n_layers; il++) {
+            exps_bytes += bytes_per_slot[il];
+        }
+        exps_bytes *= n_experts; // full exps set: per-slot bytes x experts per layer
+        // available RAM: MemAvailable includes reclaimable page cache;
+        // _SC_AVPHYS_PAGES only counts truly-free pages and underreports
+        int64_t free_ram = 0;
 #if defined(_WIN32)
-            MEMORYSTATUSEX ms;
-            memset(&ms, 0, sizeof(ms));
-            ms.dwLength = sizeof(ms);
-            if (GlobalMemoryStatusEx(&ms)) {
-                free_ram = (int64_t) ms.ullAvailPhys;
-            }
+        MEMORYSTATUSEX ms;
+        memset(&ms, 0, sizeof(ms));
+        ms.dwLength = sizeof(ms);
+        if (GlobalMemoryStatusEx(&ms)) {
+            free_ram = (int64_t) ms.ullAvailPhys;
+        }
 #else
 #if defined(__linux__)
-            FILE * f = fopen("/proc/meminfo", "r");
-            if (f) {
-                char line[256];
-                while (fgets(line, sizeof(line), f)) {
-                    if (sscanf(line, "MemAvailable: %" PRId64 " kB", &free_ram) == 1) {
-                        free_ram *= 1024;
-                        break;
-                    }
+        FILE * f = fopen("/proc/meminfo", "r");
+        if (f) {
+            char line[256];
+            while (fgets(line, sizeof(line), f)) {
+                if (sscanf(line, "MemAvailable: %" PRId64 " kB", &free_ram) == 1) {
+                    free_ram *= 1024;
+                    break;
                 }
-                fclose(f);
             }
+            fclose(f);
+        }
 #endif
-            if (free_ram <= 0) {
-                // fallback: total pages (Linux AVPHYS is the available count;
-                // other POSIX lack it, so use PHYS as a coarse bound)
-                const long page = sysconf(_SC_PAGESIZE);
+        if (free_ram <= 0) {
+            // fallback: total pages (Linux AVPHYS is the available count;
+            // other POSIX lack it, so use PHYS as a coarse bound)
+            const long page = sysconf(_SC_PAGESIZE);
 #if defined(_SC_AVPHYS_PAGES)
-                free_ram = (int64_t) sysconf(_SC_AVPHYS_PAGES) * page;
+            free_ram = (int64_t) sysconf(_SC_AVPHYS_PAGES) * page;
 #else
-                free_ram = (int64_t) sysconf(_SC_PHYS_PAGES) * page;
+            free_ram = (int64_t) sysconf(_SC_PHYS_PAGES) * page;
 #endif
-            }
+        }
 #endif
-            if (exps_bytes > 0 && free_ram > exps_bytes * 2) {
-                copy_mode = true;
-                fprintf(stderr, "hotstore: copy mode: exps (%d MiB) fit in RAM (%d MiB free)\n",
-                    (int) (exps_bytes / (1024*1024)), (int) (free_ram / (1024*1024)));
-            } else if (exps_bytes > 0) {
-                fprintf(stderr, "hotstore: move mode: exps (%d MiB) need more RAM than free (%d MiB)\n",
-                    (int) (exps_bytes / (1024*1024)), (int) (free_ram / (1024*1024)));
-            }
+        if (exps_bytes > 0 && free_ram > exps_bytes * 2) {
+            copy_mode = true;
+            fprintf(stderr, "hotstore: copy mode: exps (%d MiB) fit in RAM (%d MiB free)\n",
+                (int) (exps_bytes / (1024*1024)), (int) (free_ram / (1024*1024)));
+        } else if (exps_bytes > 0) {
+            fprintf(stderr, "hotstore: move mode: exps (%d MiB) need more RAM than free (%d MiB)\n",
+                (int) (exps_bytes / (1024*1024)), (int) (free_ram / (1024*1024)));
         }
     }
 
@@ -266,59 +265,7 @@ bool llama_expert_hotstore::allocate(
             luts[il].mask_lut[g] = ggml_new_tensor_2d(ctx_dev[g].get(), GGML_TYPE_F32, 1, local_slots + 1);
         }
 
-        // adopt the loader-streamed store buffer if present (the startup batch
-        // is already resident and the sentinel planes are zeroed), else
-        // allocate a fresh buffer
-        ggml_backend_buffer_t pre = llama_expert_preload::take_buffer();
-        if (pre) {
-            char * base = (char *) ggml_backend_buffer_get_base(pre);
-            for (auto & e : entries) {
-                const llama_expert_preload::entry * pe = nullptr;
-                for (size_t i = 0; i < llama_expert_preload::num_entries(); i++) {
-                    const auto * cand = llama_expert_preload::entry_at(i);
-                    if (cand->src == e.src) {
-                        pe = cand;
-                        break;
-                    }
-                }
-                if (!pe) {
-                    throw std::runtime_error(format("%s: preload entry missing for %s", __func__, e.src->name));
-                }
-                ggml_backend_tensor_alloc(pre, e.dst[g], base + pe->gpu_offset);
-                if (getenv("LLAMA_EXPERT_DEBUG")) {
-                    static int once = 0;
-                    if (!once) {
-                        once = 1;
-                        std::vector<uint8_t> plane(1024);
-                        for (int ex = 0; ex < (int) e.dst[g]->ne[2]; ex++) {
-                            ggml_backend_tensor_get(e.dst[g], plane.data(), (size_t) ex * pe->plane_bytes, 1024);
-                            uint64_t h = 0xcbf29ce484222325ULL;
-                            for (int i = 0; i < 1024; i++) {
-                                h ^= plane[i];
-                                h *= 0x100000001b3ULL;
-                            }
-                            const uint64_t exp = ex < hot_s ? llama_expert_preload::expected_hash(e.src, ex) : 0;
-                            fprintf(stderr, "hotstore: slot %d fnv=%016llx expected=%016llx %s\n",
-                                ex, (unsigned long long) h, (unsigned long long) exp,
-                                h == exp ? "MATCH" : "MISMATCH");
-                        }
-                    }
-                }
-            }
-            size_t lut_off = llama_expert_preload::align_up256(llama_expert_preload::entries_size());
-            for (int il = 0; il < n_layers; il++) {
-                lut_off = llama_expert_preload::align_up256(lut_off);
-                ggml_backend_tensor_alloc(pre, luts[il].hot_lut[g], base + lut_off);
-                lut_off += llama_expert_preload::align_up256((size_t) n_experts * sizeof(int32_t));
-                lut_off = llama_expert_preload::align_up256(lut_off);
-                ggml_backend_tensor_alloc(pre, luts[il].mask_lut[g], base + lut_off);
-                lut_off += llama_expert_preload::align_up256((size_t) (local_slots + 1) * sizeof(float));
-            }
-            buf_dev[g] = ggml_backend_buffer_ptr(pre);
-            ggml_backend_buffer_set_usage(buf_dev[g].get(), GGML_BACKEND_BUFFER_USAGE_WEIGHTS);
-            preloaded = true;
-        } else {
-        // check the buffer would fit before committing any VRAM
+        // allocate the store buffer: check it fits before committing any VRAM
         const size_t need = ggml_backend_alloc_ctx_tensors_from_buft_size(ctx_dev[g].get(), bufts[g]);
         if (need == 0) {
             LLAMA_LOG_ERROR("%s: hot store: zero-sized buffer on device %d, disabled\n", __func__, g);
@@ -342,7 +289,6 @@ bool llama_expert_hotstore::allocate(
         buf_dev[g] = ggml_backend_buffer_ptr(b);
         ggml_backend_buffer_set_usage(buf_dev[g].get(), GGML_BACKEND_BUFFER_USAGE_WEIGHTS);
         ggml_backend_buffer_clear(buf_dev[g].get(), 0);
-        }
 
         // sentinel mask: 1.0 for real slots, 0.0 for the sentinel plane, so
         // sentinel-routed hot rows are zeroed after the GPU mul_mat_id.
@@ -383,18 +329,8 @@ bool llama_expert_hotstore::allocate(
         ggml_backend_buffer_set_usage(buf_cpu.get(), GGML_BACKEND_BUFFER_USAGE_WEIGHTS);
     }
 
-    // the preloaded store carries the startup batch already; publish the
-    // matching LUTs now so the tier is correct from the very first token
-    // (copy_top_s later re-runs them, idempotently).
-    if (preloaded) {
-        for (int il = 0; il < n_layers; il++) {
-            for (int p = 0; p < hot_s; p++) {
-                slot_to_expert[il][p] = p;
-            }
-        }
-        update_luts();
-    }
-
+    // the startup batch is filled by copy_top_s at the first token; the LUTs
+    // are published there too, so no early publish is needed here.
 
     // register each expert weight tensor with the tier hook so build_lora_mm_id
     // can find its per-device GPU hot tensors and per-device LUTs.
@@ -437,11 +373,6 @@ bool llama_expert_hotstore::copy_top_s(const llama_expert_heatmap & heatmap) {
 
         for (entry * e : entries_by_layer[il]) {
             const size_t slot = ggml_nbytes(e->src) / (size_t) e->src->ne[2];
-            if (preloaded) {
-                // the startup slices were streamed into the store at load
-                // (write_entry), so the GPU store is already sound.
-                continue;
-            }
             const char * src = e->src->data ? (const char *) ggml_get_data(e->src) : nullptr;
             if (!src) {
                 continue;
@@ -601,7 +532,7 @@ static size_t staging_slot_off(const std::vector<llama_expert_hotstore::entry *>
     return off;
 }
 
-bool llama_expert_hotstore::resync_top_s(const llama_expert_heatmap & heatmap) {
+bool llama_expert_hotstore::resync_top_s(const llama_expert_heatmap & heatmap, int swaps_budget) {
     if (!is_filled || hot_s <= 0 || buf_dev.empty()) {
         return false;
     }
@@ -609,11 +540,14 @@ bool llama_expert_hotstore::resync_top_s(const llama_expert_heatmap & heatmap) {
         fprintf(stderr, "hotstore: resync tok=%lld\n", (long long) heatmap.tokens_total);
     }
 
+    const double t0 = ggml_time_us();
     // tokens elapsed since the previous sync, used to age dwell counters
     const int64_t elapsed = heatmap.tokens_total - last_sync_tokens;
     int changed = 0;
+    int moved = 0; // placement changes counted toward the swap budget
+    bool done = false; // swap budget exhausted: stop touching further layers
     std::vector<char> dirty(n_layers, 0); // layers whose LUTs need rebuilding
-    for (int il = 0; il < n_layers; il++) {
+    for (int il = 0; il < n_layers && !done; il++) {
         auto & ste   = slot_to_expert[il];
         auto & dc    = dwell_count[il];
         auto & rout  = gpu_routed[il];
@@ -629,57 +563,61 @@ bool llama_expert_hotstore::resync_top_s(const llama_expert_heatmap & heatmap) {
                 if (getenv("LLAMA_EXPERT_NO_VERIFY")) {
                     it->verified = true; // safety dropped: trust the staging copy
                 } else {
-                bool ok = true;
-                for (entry * ent : entries_by_layer[il]) {
-                    const int pidx = llama_expert_preload::index_of(ent->src);
-                    if (pidx < 0) {
-                        continue; // mmap: file-backed, nothing to verify
-                    }
-                    const size_t slot = ggml_nbytes(ent->src) / (size_t) ent->src->ne[2];
-                    const uint64_t exp = llama_expert_preload::expected_hash(ent->src, it->expert);
-                    const uint64_t got = hash_slice_at(&stg[stg_off + staging_slot_off(entries_by_layer[il], ent)], slot);
-                    if (exp == 0 || exp != got) {
-                        ok = false;
-                        break;
-                    }
-                }
-                if (ok) {
-                    it->verified = true;
-                } else if (++it->failures >= 5) {
-                    // corruption recovery: the GPU -> staging copy kept failing,
-                    // so re-read the expert straight from the gguf file into the
-                    // CPU slice (ground truth); only then route it cold
-                    bool recovered = true;
+                    bool ok = true;
                     for (entry * ent : entries_by_layer[il]) {
                         const int pidx = llama_expert_preload::index_of(ent->src);
                         if (pidx < 0) {
-                            continue; // mmap: data stays in the file
+                            continue; // mmap: file-backed, nothing to verify
                         }
                         const size_t slot = ggml_nbytes(ent->src) / (size_t) ent->src->ne[2];
-                        std::vector<uint8_t> buf(slot);
-                        if (!llama_expert_preload::read_expert(pidx, it->expert, buf.data(), slot)) {
-                            recovered = false;
+                        const uint64_t exp = llama_expert_preload::expected_hash(ent->src, it->expert);
+                        const uint64_t got = hash_slice_at(&stg[stg_off + staging_slot_off(entries_by_layer[il], ent)], slot);
+                        if (exp == 0 || exp != got) {
+                            ok = false;
+                            break;
+                        }
+                    }
+                    if (ok) {
+                        it->verified = true;
+                    } else if (++it->failures >= 5) {
+                        // corruption recovery: the GPU -> staging copy kept failing,
+                        // so re-read the expert straight from the gguf file into the
+                        // CPU slice (ground truth); only then route it cold
+                        bool recovered = true;
+                        for (entry * ent : entries_by_layer[il]) {
+                            const int pidx = llama_expert_preload::index_of(ent->src);
+                            if (pidx < 0) {
+                                continue; // mmap: data stays in the file
+                            }
+                            const size_t slot = ggml_nbytes(ent->src) / (size_t) ent->src->ne[2];
+                            std::vector<uint8_t> buf(slot);
+                            if (!llama_expert_preload::read_expert(pidx, it->expert, buf.data(), slot)) {
+                                recovered = false;
+                                continue;
+                            }
+                            if (llama_expert_preload::expected_hash(ent->src, it->expert) != hash_slice_at(buf.data(), slot)) {
+                                recovered = false;
+                            }
+                            llama_expert_preload::set_cpu_slice(pidx, it->expert, buf.data());
+                        }
+                        if (recovered) {
+                            rout[it->expert] = 0;
+                            ste[it->p] = -1;
+                            dirty[il] = 1;
+                            changed++;
+                            moved++;
+                            if (swaps_budget >= 0 && moved >= swaps_budget) {
+                                done = true;
+                            }
+                            it = pout.erase(it);
                             continue;
                         }
-                        if (llama_expert_preload::expected_hash(ent->src, it->expert) != hash_slice_at(buf.data(), slot)) {
-                            recovered = false;
+                        if (getenv("LLAMA_EXPERT_DEBUG")) {
+                            fprintf(stderr, "hotstore: move-out ABORT expert %d after %d fails\n", it->expert, it->failures);
                         }
-                        llama_expert_preload::set_cpu_slice(pidx, it->expert, buf.data());
-                    }
-                    if (recovered) {
-                        rout[it->expert] = 0;
-                        ste[it->p] = -1;
-                        dirty[il] = 1;
-                        changed++;
                         it = pout.erase(it);
                         continue;
                     }
-                    if (getenv("LLAMA_EXPERT_DEBUG")) {
-                        fprintf(stderr, "hotstore: move-out ABORT expert %d after %d fails\n", it->expert, it->failures);
-                    }
-                    it = pout.erase(it);
-                    continue;
-                }
                 }
             }
             if (it->verified && --it->countdown <= 0) {
@@ -695,6 +633,10 @@ bool llama_expert_hotstore::resync_top_s(const llama_expert_heatmap & heatmap) {
                 ste[it->p] = -1;      // the GPU slot is freed
                 dirty[il] = 1;
                 changed++;
+                moved++;
+                if (swaps_budget >= 0 && moved >= swaps_budget) {
+                    done = true;
+                }
                 it = pout.erase(it);
             } else {
                 ++it;
@@ -779,6 +721,10 @@ bool llama_expert_hotstore::resync_top_s(const llama_expert_heatmap & heatmap) {
                 }
                 dirty[il] = 1;
                 changed++;
+                moved++;
+                if (swaps_budget >= 0 && moved >= swaps_budget) {
+                    done = true;
+                }
                 it = pin.erase(it);
             } else {
                 ++it;
@@ -930,6 +876,10 @@ bool llama_expert_hotstore::resync_top_s(const llama_expert_heatmap & heatmap) {
             dc[best_slot]  = -elapsed * (dwell + 2);
             dirty[il] = 1;
             changed++;
+            moved++;
+            if (swaps_budget >= 0 && moved >= swaps_budget) {
+                done = true;
+            }
             if (getenv("LLAMA_EXPERT_DEBUG")) {
                 fprintf(stderr, "hotstore: d2d swap promote=%d demote=%d (dev %d -> %d) promote_s=%.2f worst=%.2f hyst=%.2f\n",
                     e_promote, e_demote, g+1, g, best_score, worst_bound, hyst * worst_bound);
@@ -990,6 +940,14 @@ bool llama_expert_hotstore::resync_top_s(const llama_expert_heatmap & heatmap) {
     }
 
     last_sync_tokens = heatmap.tokens_total;
+    // feed the resync wall-clock cost into the cadence EMA
+    const double dt_us = ggml_time_us() - t0;
+    if (have_sync) {
+        ema_sync_us = 0.7 * ema_sync_us + 0.3 * dt_us;
+    } else {
+        ema_sync_us = dt_us;
+        have_sync = true;
+    }
     if (changed > 0) {
         update_luts(dirty);
         if (getenv("LLAMA_EXPERT_DEBUG")) {
@@ -1004,20 +962,92 @@ bool llama_expert_hotstore::maybe_resync(const llama_expert_heatmap & heatmap, b
     if (multi_slot || heatmap.tokens_total <= 0) {
         return false;
     }
-    // adaptive cadence: floor 10 (5 in copy mode: host-pool moves are half
-    // the bandwidth), stretching to 32 as the hit rate climbs toward 6x target
-    float ratio = hit_rate_valid ? hit_rate / target_hit_rate() : 0.0f;
-    const int floor = copy_mode ? 5 : 10;
-    const int eff_period = std::max(floor, std::min(32, floor + (int) (27.0f * (ratio - 1.0f) / 5.0f)));
+    int eff_period;
+    if (swaps_per_turn > 0) {
+        // low-bandwidth mode: a fixed turn, a model-wide swap budget per turn
+        eff_period = 32;
+    } else {
+        // wall-clock cadence: the period must absorb the resync cost several
+        // times over, else the store churns faster than it helps (RFC #24528:
+        // tune on wall-clock, not hit rate, which plateaus flat).
+        const int floor = copy_mode ? 5 : 10;
+        int period = 32;
+        if (have_tokens && have_sync && ema_tok_us > 0.0) {
+            const double cost = ema_sync_us / ema_tok_us;
+            period = std::max(floor, (int) std::ceil(4.0 * cost));
+        }
+        eff_period = std::max(floor, std::min(32, period));
+    }
     if (heatmap.tokens_total / eff_period > last_sync_tokens / eff_period) {
         if (getenv("LLAMA_EXPERT_FULL_SYNC")) {
             // test: mirror the whole store to the top-S on each sync instead of
             // the incremental handshake (pair with --expert-sync-period N)
             return resync_full_mirror(heatmap, std::max(1, hot_s));
         }
-        return resync_top_s(heatmap);
+        return resync_top_s(heatmap, swaps_per_turn > 0 ? swaps_per_turn : -1);
     }
     return false;
+}
+
+void llama_expert_hotstore::note_decode(int64_t us) {
+    const double d = (double) us;
+    if (have_tokens) {
+        ema_tok_us = 0.8 * ema_tok_us + 0.2 * d;
+    } else {
+        ema_tok_us = d;
+        have_tokens = true;
+    }
+}
+
+void llama_expert_hotstore::begin_moves() {
+    if (moves_started || copy_mode || !is_filled) {
+        moves_started = true;
+        return;
+    }
+    moves_started = true;
+    // the startup batch now lives on the GPU; release its host pages so decode
+    // does not pay for their RSS (they are re-read from the gguf file before
+    // any later prefill, see restore_hot_rows).
+    for (int il = 0; il < n_layers; il++) {
+        for (entry * e : entries_by_layer[il]) {
+            const int pidx = llama_expert_preload::index_of(e->src);
+            if (pidx < 0) {
+                continue;
+            }
+            for (int ex = 0; ex < n_experts; ex++) {
+                if (gpu_routed[il][ex]) {
+                    llama_expert_preload::free_cpu_slice((size_t) pidx, ex);
+                }
+            }
+        }
+    }
+}
+
+void llama_expert_hotstore::restore_hot_rows() {
+    if (!moves_started || copy_mode) {
+        return;
+    }
+    // a multi-token ubatch bypasses the tier and the stock path reads the
+    // tensor payloads; re-fill the released host rows of the GPU-resident
+    // experts straight from the gguf file so prefill sees valid weights.
+    for (int il = 0; il < n_layers; il++) {
+        for (entry * e : entries_by_layer[il]) {
+            const int pidx = llama_expert_preload::index_of(e->src);
+            if (pidx < 0) {
+                continue;
+            }
+            const size_t slot = ggml_nbytes(e->src) / (size_t) e->src->ne[2];
+            std::vector<uint8_t> buf(slot);
+            for (int ex = 0; ex < n_experts; ex++) {
+                if (!gpu_routed[il][ex]) {
+                    continue;
+                }
+                if (llama_expert_preload::read_expert((size_t) pidx, ex, buf.data(), slot)) {
+                    llama_expert_preload::set_cpu_slice((size_t) pidx, ex, buf.data());
+                }
+            }
+        }
+    }
 }
 
 int llama_expert_hotstore::slot_of(int layer_idx, int expert_id) const {
@@ -1184,7 +1214,8 @@ float llama_expert_hotstore::target_hit_rate() const {
 void llama_expert_hotstore::log() const {
     fprintf(stderr, "hotstore: sizing (S=%d)\n", hot_s);
     const bool debug = getenv("LLAMA_EXPERT_DEBUG") != nullptr;
-    size_t total = 0;    for (int il = 0; il < n_layers; il++) {
+    size_t total = 0;
+    for (int il = 0; il < n_layers; il++) {
         total += bytes_per_slot[il];
         if (debug) {
             fprintf(stderr, "  layer %3d: bytes/slot = %zu\n", il, bytes_per_slot[il]);

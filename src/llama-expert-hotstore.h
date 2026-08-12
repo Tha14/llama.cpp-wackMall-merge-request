@@ -64,9 +64,13 @@ struct llama_expert_hotstore {
     ggml_backend_buffer_ptr buf_cpu;
 
     // true once the first copy of the top-S experts landed (once per session)
-    bool is_filled = false;    // true when the store buffer was streamed by the loader (startup batch
-    // already resident), so the fill does not copy again
-    bool preloaded = false;
+    bool is_filled = false;
+
+    // move mode: once the store filled and decode started, the host pages of
+    // the GPU-resident experts are released (madvise); they are re-read from
+    // the gguf file before any later prefill (the stock path reads the tensor
+    // payloads, which would otherwise fault on freed pages).
+    bool moves_started = false;
 
     // true when expert e of layer il is GPU-counted (output comes from the store)
     bool is_resident(int il, int e) const {
@@ -74,19 +78,25 @@ struct llama_expert_hotstore {
                e >= 0 && e < (int) gpu_routed[il].size() && gpu_routed[il][e] != 0;
     }
 
-    // re-sync cadence in tokens; 0 disables periodic re-sync
+    // re-sync cadence in tokens (constructor feed; the active pacing is the
+    // wall-clock cadence below, so this is informational only)
     int sync_period = 0;
     // tokens_total at the last sync (fill or re-sync) for boundary-cross check
     int64_t last_sync_tokens = 0;
 
-    // adaptive cadence: smoothed hit rate + the target the store must reach
-    // before the resync slows. target = 0.8 * (hot_s/n_experts)^0.6, clamped to
-    // [0.2, 0.9]: small models (store ~ full) aim ~80%, 1/5-fit models ~30%.
-    // hit_rate >= 0.95 disables the resync entirely.
+    // diagnostic hit rate (see read_counts); not used for the resync cadence,
+    // which is driven by wall-clock cost (ema_tok_us/ema_sync_us) below.
     float hit_rate = 0.0f;
     bool  hit_rate_valid = false;
 
     float target_hit_rate() const;
+
+    // wall-clock cadence feeds: EMA of the decode compute time and of the last
+    // resync duration, so maybe_resync can pace the resyncs against their cost
+    double ema_tok_us  = 0.0;
+    double ema_sync_us = 0.0;
+    bool   have_tokens = false;
+    bool   have_sync   = false;
 
     // start-up full sync: after the 3-token heat boost, mirror the store to the
     // top-S over the next `full_sync_remaining` tokens (budget hot_s/4 per token)
@@ -99,6 +109,9 @@ struct llama_expert_hotstore {
     int   dwell = 0;    // minimum syncs a resident must keep; 0 = off
     bool  copy_mode = false; // resolved: keep the RAM copy of promoted experts
     int   mode = 0;         // user mode: 0 = auto, 1 = copy, 2 = move
+    // low-bandwidth mode: fixed 32-token turn, at most swaps_per_turn expert
+    // placement changes model-wide per turn (0 = unlimited, adaptive cadence)
+    int swaps_per_turn = 0;
     // max concurrent transfers in flight per layer, per direction (eviction
     // queue + promotion queue). higher = faster store adaptation, at the cost
     // of more slots temporarily in transition (not counted).
@@ -139,7 +152,8 @@ struct llama_expert_hotstore {
 
 llama_expert_hotstore(const llama_model * model, int n_layers,
                       int n_experts, int hot_s, int sync_period = 0,
-                      float hyst = 0.0f, int dwell = 0, int mode = 0);
+                      float hyst = 0.0f, int dwell = 0, int mode = 0,
+                      int swaps_per_turn = 0);
 
     ~llama_expert_hotstore();
 
@@ -151,25 +165,36 @@ llama_expert_hotstore(const llama_model * model, int n_layers,
 
     // copy the top-S expert slices for every layer into the GPU hot store,
     // using the given heatmap for the ranking. one-shot (guarded by is_filled).
-    // copy the top-S expert slices for every layer into the GPU hot store,
-    // using the given heatmap for the ranking. one-shot (guarded by is_filled).
     // returns true if a fill happened (caller should synchronize the GPU).
     bool copy_top_s(const llama_expert_heatmap & heatmap);
 
     // re-sync the hot store to the current heatmap ranking, swapping only
     // the experts that changed (stable slots; unchanged experts not re-copied).
+    // swaps_budget >= 0 caps the placement changes model-wide per call.
     // returns true if any slot changed (caller should synchronize the GPU).
-    bool resync_top_s(const llama_expert_heatmap & heatmap);
+    bool resync_top_s(const llama_expert_heatmap & heatmap, int swaps_budget = -1);
 
 
     // LLAMA_EXPERT_FULL_SYNC: mirror the store to the top-S every token
     // (direct swaps, hash-verified, copy-on-read). no pacing queues.
     bool resync_full_mirror(const llama_expert_heatmap & heatmap, int budget = 1);
 
-    // cadence-gated wrapper: re-sync only if tokens_total crossed sync_period;
-    // multi_slot freezes the hot store (static slots, no swapping). returns
-    // true if a re-sync ran and swapped slots.
+    // cadence-gated wrapper: re-sync only if tokens_total crossed the adaptive
+    // period; multi_slot freezes the hot store (static slots, no swapping).
+    // returns true if a re-sync ran and swapped slots.
     bool maybe_resync(const llama_expert_heatmap & heatmap, bool multi_slot);
+
+    // wall-clock feed: the decode compute time of the last single-token
+    // ubatch, used by maybe_resync to pace the resyncs against their cost.
+    void note_decode(int64_t us);
+
+    // move mode: release the host rows of the GPU-resident experts now that the
+    // store is filled and decode is about to read the cold ones from the CPU.
+    void begin_moves();
+
+    // before any multi-token ubatch after moves have started: the stock path
+    // reads the tensor payloads, so re-fill the released host rows from disk.
+    void restore_hot_rows();
 
     // returns the GPU slot index holding expert_id in layer il, or -1 if none
     int slot_of(int layer_idx, int expert_id) const;
