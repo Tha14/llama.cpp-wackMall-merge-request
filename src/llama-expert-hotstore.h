@@ -158,9 +158,11 @@ llama_expert_hotstore(const llama_model * model, int n_layers,
     ~llama_expert_hotstore();
 
     // allocate the GPU hot store for `hot_s` slots, split across the given
-    // device buffer types by tensor_split (fractions, one per device). returns
-    // false (and leaves the store disabled) on failure or shortage of VRAM.
+    // device buffer types by hot_split fractions (one per device, mirroring
+    // --expert-hot-split; falls back to tensor_split when hot_split is null).
+    // returns false (and leaves the store disabled) on failure or shortage of VRAM.
     bool allocate(const std::vector<ggml_backend_buffer_type_t> & bufts,
+                  const float * hot_split, int n_hot_split,
                   const float * tensor_split, int n_split);
 
     // copy the top-S expert slices for every layer into the GPU hot store,

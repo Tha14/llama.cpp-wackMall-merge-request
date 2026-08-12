@@ -488,6 +488,9 @@ llama_context::llama_context(
     }
 
     if (hparams.n_expert > 0 && !cparams.warmup && params.expert_hot_s != 0) {
+        if (params.expert_gpu >= 0 && params.expert_hot_split_set) {
+            LLAMA_LOG_WARN("%s: --expert-hot-split is ignored when --expert-gpu pins a single device\n", __func__);
+        }
         const int sync_period = params.expert_sync_period;
         expert_hotstore = std::make_unique<llama_expert_hotstore>(
             &model, hparams.n_layer(), hparams.n_expert,
@@ -519,7 +522,10 @@ llama_context::llama_context(
                     __func__, min_cc / 100, (min_cc / 10) % 10);
                 cc_blocked = true;
             } else {
-                cache_enabled = expert_hotstore->allocate(gpu_bufts, model.tensor_split(), (int) gpu_bufts.size());
+                // per-GPU hot slot split: --expert-hot-split wins over the
+                // model tensor-split when both are present (-1 = all GPUs)
+                const float * hot_split = params.expert_hot_split_set ? params.expert_hot_split : nullptr;
+                cache_enabled = expert_hotstore->allocate(gpu_bufts, hot_split, (int) gpu_bufts.size(), model.tensor_split(), (int) gpu_bufts.size());
             }
         }
         // launch hint: cache did not engage, usually no GPU accelerator
@@ -3683,6 +3689,8 @@ llama_context_params llama_context_default_params() {
         /*.expert_sidecar              =*/ false,
         /*.expert_gpu                  =*/ -1,
         /*.expert_swaps_per_turn       =*/ 0,
+        /*.expert_hot_split            =*/ {0},
+        /*.expert_hot_split_set        =*/ false,
         /*.ctx_other                   =*/ nullptr,
     };
 

@@ -2798,6 +2798,31 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
             params.expert_gpu = llama_expert_preload::expert_gpu_parse(value);
         }
     ).set_env("LLAMA_ARG_EXPERT_GPU"));
+    add_opt(common_arg(
+        {"--expert-hot-split"}, "N0,N1,N2,...",
+        "fraction of the hot expert slots to place on each GPU, comma-separated "
+        "list of proportions following the device order (e.g. 3,1); only used "
+        "when --expert-gpu is -1 (all GPUs)",
+        [](common_params & params, const std::string & value) {
+            // split string by , and /
+            const std::regex regex{ R"([,/]+)" };
+            std::sregex_token_iterator it{ value.begin(), value.end(), regex, -1 };
+            std::vector<std::string> split_arg{ it, {} };
+            if (split_arg.size() >= llama_max_devices()) {
+                throw std::invalid_argument(
+                    string_format("got %zu input configs, but system only has %zu devices", split_arg.size(), llama_max_devices())
+                );
+            }
+            for (size_t i = 0; i < llama_max_devices(); ++i) {
+                if (i < split_arg.size()) {
+                    params.expert_hot_split[i] = std::stof(split_arg[i]);
+                } else {
+                    params.expert_hot_split[i] = 0.0f;
+                }
+            }
+            params.expert_hot_split_set = true;
+        }
+    ).set_env("LLAMA_ARG_EXPERT_HOT_SPLIT"));
     GGML_ASSERT(params.n_gpu_layers < 0); // string_format would need to be extended for a default >= 0
     add_opt(common_arg(
         {"-ngl", "--gpu-layers", "--n-gpu-layers"}, "N",

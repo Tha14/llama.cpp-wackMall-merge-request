@@ -535,6 +535,8 @@ struct common_params {
     int   expert_swaps_per_turn       = 0;    // model-wide expert swaps per sync turn (0 = unlimited)
     bool  expert_sidecar         = false; // load/save the expert heatmap sidecar (<model>.tier)
     int   expert_gpu             = -1;   // expert store GPU index, resolved from --expert-gpu (index or device name like CUDA0; -1 = all GPUs)
+    float expert_hot_split[128]  = {0};  // per-GPU hot-slot proportions (relative, like tensor-split)
+    bool  expert_hot_split_set   = false; // set when --expert-hot-split was given
     bool    offline                    = false;
 
     int32_t ppl_stride      = 0;     // stride for perplexity calculations. If left at 0, the pre-existing approach will be used.

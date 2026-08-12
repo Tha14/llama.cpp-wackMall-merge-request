@@ -197,6 +197,7 @@ llama_expert_hotstore::llama_expert_hotstore(
 
 bool llama_expert_hotstore::allocate(
         const std::vector<ggml_backend_buffer_type_t> & bufts,
+        const float * hot_split, int n_hot_split,
         const float * tensor_split, int n_split) {
     if (hot_s <= 0 || entries.empty()) {
         return false;
@@ -213,12 +214,14 @@ bool llama_expert_hotstore::allocate(
     slot_start.assign(n_devices, 0);
     slot_end.assign(n_devices, 0);
 
-    // per-device slot ranges from the tensor_split fractions (-ts); even split
-    // when the fractions are all zero
+    // per-device slot ranges from the --expert-hot-split fractions, else the
+    // tensor_split fractions (-ts); even split when both are absent or zero
+    const int n_frac = std::min(hot_split ? n_hot_split : n_split, n_devices);
+    const float * frac_src = hot_split ? hot_split : tensor_split;
     {
         float total = 0.0f;
-        for (int g = 0; g < n_devices; g++) {
-            total += tensor_split ? tensor_split[g] : 0.0f;
+        for (int g = 0; g < n_frac; g++) {
+            total += frac_src ? frac_src[g] : 0.0f;
         }
         if (total <= 0.0f) {
             total = (float) n_devices;
@@ -226,7 +229,7 @@ bool llama_expert_hotstore::allocate(
         int acc = 0;
         for (int g = 0; g < n_devices; g++) {
             slot_start[g] = acc;
-            const float frac = tensor_split && tensor_split[g] > 0.0f ? tensor_split[g] : 1.0f;
+            const float frac = frac_src && g < n_frac && frac_src[g] > 0.0f ? frac_src[g] : 1.0f;
             slot_end[g] = acc + (int) ((float) hot_s * frac / total);
             acc = slot_end[g];
         }
@@ -364,13 +367,22 @@ bool llama_expert_hotstore::copy_top_s(const llama_expert_heatmap & heatmap) {
         return false;
     }
 
+    // a sidecar restore carries real heat: seed each layer from its top-S;
+    // a cold store has no signal yet, so keep the first S expert ids
+    const bool have_prior = heatmap.tokens_total > 0;
     for (int il = 0; il < n_layers; il++) {
         auto & ste = slot_to_expert[il];
         auto & dc  = dwell_count[il];
-        // startup batch: the first S experts of each layer go to the GPU
+        // startup batch: the top-S experts of each layer go to the GPU
         for (int p = 0; p < hot_s; p++) {
             ste[p] = p;
             dc[p]  = dwell; // initial fill is eligible to be corrected next sync
+        }
+        if (have_prior) {
+            auto top = heatmap.get_top_s(il, hot_s);
+            for (int p = 0; p < (int) top.size(); p++) {
+                ste[p] = top[p];
+            }
         }
 
         for (entry * e : entries_by_layer[il]) {
@@ -1231,6 +1243,10 @@ void llama_expert_hotstore::log() const {
             ggml_backend_buffer_get_size(buf_dev[0].get()),
             ggml_backend_buffer_get_size(buf_dev[0].get()) / (1024 * 1024),
             hot_s, n_devices, hot_s);
+        for (int g = 0; g < n_devices; g++) {
+            fprintf(stderr, "  device %d: slots [%d, %d) (%d)\n",
+                g, slot_start[g], slot_end[g], slot_end[g] - slot_start[g]);
+        }
     } else if (hot_s > 0) {
         fprintf(stderr, "  hot store DISABLED (%d slots requested)\n", hot_s);
     }
