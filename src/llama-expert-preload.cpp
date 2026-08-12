@@ -306,6 +306,16 @@ void free_cpu_slice(size_t idx, int expert) {
 }
 
 void set_cpu_slice(size_t idx, int expert, const uint8_t * data) {
+#ifdef _WIN32
+    // Windows maps the gguf tensor payloads into a read-only file mapping and
+    // never relinquishes the RAM copy (release_pages is a no-op below), so the
+    // expert bytes are always resident and this write-back is both redundant
+    // and illegal: memcpy into a PAGE_READONLY view faults (access violation).
+    (void) idx;
+    (void) expert;
+    (void) data;
+    return;
+#endif
     if (idx >= g_entries.size() || !g_entries[idx].src || !data) {
         return;
     }

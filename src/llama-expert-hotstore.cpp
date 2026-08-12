@@ -304,8 +304,10 @@ bool llama_expert_hotstore::allocate(
                     std::vector<float> rb(local_slots + 1);
                     ggml_backend_tensor_get(luts[il].mask_lut[g], rb.data(), 0,
                         (local_slots + 1) * sizeof(float));
-                    fprintf(stderr, "hotstore: mask_lut[0..3]=%.1f %.1f %.1f %.1f [95]=%.1f [96]=%.1f\n",
-                        rb[0], rb[1], rb[2], rb[3], rb[95], rb[96]);
+                    fprintf(stderr, "hotstore: mask_lut[0..3]=%.1f %.1f %.1f %.1f [97-1]=%.1f [97]=%.1f\n",
+                        rb[0], rb[1], rb[2], rb[3],
+                        rb[local_slots > 0 ? local_slots - 1 : 0],
+                        rb[local_slots]);
                 }
             }
         }
