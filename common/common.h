@@ -537,6 +537,8 @@ struct common_params {
     int   expert_gpu             = -1;   // expert store GPU index, resolved from --expert-gpu (index or device name like CUDA0; -1 = all GPUs)
     float expert_hot_split[128]  = {0};  // per-GPU hot-slot proportions (relative, like tensor-split)
     bool  expert_hot_split_set   = false; // set when --expert-hot-split was given
+    int   expert_cold_s          = 0;    // bottom-C expert slots parked on the coldstore GPU (0 = disabled)
+    int   expert_cold_gpu        = -1;   // coldstore GPU index, resolved from --expert-cold-gpu (device name like CUDA1; -1 = disabled)
     bool    offline                    = false;
 
     int32_t ppl_stride      = 0;     // stride for perplexity calculations. If left at 0, the pre-existing approach will be used.

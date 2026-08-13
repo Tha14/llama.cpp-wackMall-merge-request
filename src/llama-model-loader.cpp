@@ -1674,7 +1674,7 @@ bool llama_model_loader::load_all_data(
                 continue;
             }
             const size_t plane = ggml_nbytes(t) / (size_t) t->ne[2];
-            llama_expert_preload::register_tensor(t, plane, (int) t->ne[2], w->offs, files.at(w->idx)->file_id(), (const uint8_t *) t->data);
+            llama_expert_preload::register_tensor(t, plane, (int) t->ne[2], w->offs, files.at(w->idx)->file_id(), (const uint8_t *) t->data, use_mmap);
         }
     }
 

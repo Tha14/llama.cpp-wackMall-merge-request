@@ -17,6 +17,7 @@ struct llama_expert_hotstore {
     int n_layers;
     int n_experts;
     int hot_s;
+    int cold_s = 0;
 
     // bytes of a single expert slot per layer, summed over that layer's
     // expert weight tensors (gate/up/down, incl. chexps variants)
@@ -28,6 +29,7 @@ struct llama_expert_hotstore {
         int          layer_idx;
         ggml_tensor* src; // model tensor holding all n_experts slices
         std::vector<ggml_tensor *> dst; // per-device hot tensors
+        ggml_tensor * dst_cold = nullptr; // coldstore tensor (single cold device), cold_s planes
     };
     std::vector<entry> entries;
 
@@ -42,7 +44,10 @@ struct llama_expert_hotstore {
     // hot_lut[g][e]   = LOCAL slot index if e is hot on device g, else the
     //                   device's local sentinel slot (zero contribution).
     // cold_mask[e]    = 1 if e is cold, else 0 (read as int zero-check by
-    //                   mul_mat_id_cold).
+    //                   mul_mat_id_cold). coldstore residents count as cold:
+    //                   the CPU cold op computes them from the gguf-backed
+    //                   tensor pages, the coldstore copy is never read by the
+    //                   graph.
     struct layer_lut {
         std::vector<ggml_tensor *> hot_lut; // per-device i32[n_experts]
         std::vector<ggml_tensor *> mask_lut; // per-device f32[local_slots+1], 0 at sentinel
@@ -62,6 +67,18 @@ struct llama_expert_hotstore {
     // CPU context and buffer for host-side tensors (like cold_mask)
     ggml_context_ptr        ctx_cpu;
     ggml_backend_buffer_ptr buf_cpu;
+
+    // coldstore: a copy of the bottom-C (coldest) experts parked on a weak
+    // secondary GPU to relieve host RAM. never read by the graph; the CPU cold
+    // op computes those experts from the gguf-backed tensor pages. own slot
+    // array, buf/ctx and routing flags; update_luts keeps cold_mask at 1 for
+    // them so the CPU cold op covers them.
+    ggml_context_ptr        ctx_cold;
+    ggml_backend_buffer_ptr buf_cold;
+    std::vector<std::vector<int>>  slot_to_cold; // [il][p] = expert id, or -1
+    std::vector<std::vector<char>> cold_routed;  // [il][e] = 1 when resident on the cold device
+    std::vector<std::vector<int>>  cold_dwell;   // [il][p] syncs since last change
+    bool cold_filled = false;
 
     // true once the first copy of the top-S experts landed (once per session)
     bool is_filled = false;
@@ -90,6 +107,11 @@ struct llama_expert_hotstore {
     bool  hit_rate_valid = false;
 
     float target_hit_rate() const;
+
+    // running routed-expert hit statistics (moe_sel readback, LLAMA_EXPERT_HITRATE
+    // debug only). accumulated over the run, printed once at llama_perf_context_print.
+    size_t hit_acc_hits  = 0;
+    size_t hit_acc_total = 0;
 
     // wall-clock cadence feeds: EMA of the decode compute time and of the last
     // resync duration, so maybe_resync can pace the resyncs against their cost
@@ -151,7 +173,8 @@ struct llama_expert_hotstore {
     std::vector<size_t>  cpu_staging_off; // [il] offset into cpu_staging
 
 llama_expert_hotstore(const llama_model * model, int n_layers,
-                      int n_experts, int hot_s, int sync_period = 0,
+                      int n_experts, int hot_s, int cold_s,
+                      int sync_period = 0,
                       float hyst = 0.0f, int dwell = 0, int mode = 0,
                       int swaps_per_turn = 0);
 
@@ -165,10 +188,23 @@ llama_expert_hotstore(const llama_model * model, int n_layers,
                   const float * hot_split, int n_hot_split,
                   const float * tensor_split, int n_split);
 
+    // allocate the coldstore for `s` slots on the given (single) device
+    // buffer type. returns false on failure or VRAM shortage.
+    bool allocate_cold(ggml_backend_buffer_type_t buft, int s);
+
     // copy the top-S expert slices for every layer into the GPU hot store,
     // using the given heatmap for the ranking. one-shot (guarded by is_filled).
     // returns true if a fill happened (caller should synchronize the GPU).
     bool copy_top_s(const llama_expert_heatmap & heatmap);
+
+    // copy the bottom-C (coldest) expert slices into the coldstore. one-shot
+    // (guarded by cold_filled). call after copy_top_s so update_luts sees both.
+    bool copy_cold_bottom_s(const llama_expert_heatmap & heatmap);
+
+    // re-sync the coldstore to the current bottom-C ranking. direct swaps
+    // (one cold slot per layer), hash-verified before routing. returns true
+    // if any slot changed (caller should synchronize the GPU).
+    bool resync_cold(const llama_expert_heatmap & heatmap);
 
     // re-sync the hot store to the current heatmap ranking, swapping only
     // the experts that changed (stable slots; unchanged experts not re-copied).
@@ -208,9 +244,11 @@ llama_expert_hotstore(const llama_model * model, int n_layers,
     // call after the graph compute; n_tokens advances the heatmap clock.
     void read_counts(llama_expert_heatmap & heatmap, int n_tokens);
 
-    // diagnostic: count how many router-selected expert ids hit a hot slot.
-    // reads the selected_experts tensors (call after synchronize).
+    // diagnostic: accumulate how many router-selected expert ids hit a hot
+    // slot. reads the selected_experts tensors (call after synchronize); the
+    // running average is printed once by llama_perf_context_print.
     void log_hit_rate(const std::vector<std::pair<int, ggml_tensor *>> & moe_sel);
+    bool hit_rate_avg(size_t & hits, size_t & total) const;
 
     // rebuild hot_lut/cold_mask from slot_to_expert for every layer
     // and copy them into the tensors. called from copy_top_s (initial

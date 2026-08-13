@@ -419,6 +419,8 @@ extern "C" {
         int   expert_swaps_per_turn;  // model-wide expert swaps per sync turn; 0 = unlimited (low-bandwidth mode)
         float expert_hot_split[128];  // per-GPU hot-slot proportions (-1 = all GPUs); 0 = follow tensor_split
         bool  expert_hot_split_set;   // true when --expert-hot-split was given
+        int   expert_cold_s;          // number of bottom-C expert slots parked on the coldstore GPU (0 = disabled)
+        int   expert_cold_gpu;        // put the coldstore on this GPU index (device name like CUDA1; -1 = disabled)
 
         // a source/target/parent context
         // can be utilized in various ways, for example by sharing results or llama_memory between 2 contexts
@@ -1583,6 +1585,11 @@ extern "C" {
     LLAMA_API struct llama_perf_context_data llama_perf_context      (const struct llama_context * ctx);
     LLAMA_API void                           llama_perf_context_print(const struct llama_context * ctx);
     LLAMA_API void                           llama_perf_context_reset(      struct llama_context * ctx);
+
+    // accumulated hot-store routed-expert hit statistics (hits/total) since the
+    // context was created; returns false when the hot store never tracked any
+    // (inactive, or LLAMA_EXPERT_HITRATE not set during decode)
+    LLAMA_API bool llama_context_hotstore_hit_rate(const struct llama_context * ctx, size_t * hits, size_t * total);
 
     // NOTE: the following work only with samplers constructed via llama_sampler_chain_init
     LLAMA_API struct llama_perf_sampler_data llama_perf_sampler      (const struct llama_sampler * chain);

@@ -2823,6 +2823,22 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
             params.expert_hot_split_set = true;
         }
     ).set_env("LLAMA_ARG_EXPERT_HOT_SPLIT"));
+    add_opt(common_arg(
+        {"--expert-cold-s"}, "N",
+        "number of bottom-C (coldest) expert slots to park on the coldstore "
+        "GPU (default: 0 = disabled); requires the hot store to be active",
+        [](common_params & params, int value) {
+            params.expert_cold_s = value;
+        }
+    ).set_env("LLAMA_ARG_EXPERT_COLD_S"));
+    add_opt(common_arg(
+        {"--expert-cold-gpu"}, "NAME",
+        "put the coldstore on this GPU, a device name like CUDA1 (default: "
+        "unset = disabled)",
+        [](common_params & params, const std::string & value) {
+            params.expert_cold_gpu = llama_expert_preload::expert_gpu_parse(value);
+        }
+    ).set_env("LLAMA_ARG_EXPERT_COLD_GPU"));
     GGML_ASSERT(params.n_gpu_layers < 0); // string_format would need to be extended for a default >= 0
     add_opt(common_arg(
         {"-ngl", "--gpu-layers", "--n-gpu-layers"}, "N",

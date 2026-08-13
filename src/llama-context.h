@@ -189,6 +189,10 @@ struct llama_context {
     llama_perf_context_data perf_get_data() const;
     void perf_reset();
 
+    // accumulated routed-expert hit statistics of the hot store (hits/total);
+    // returns false when the hot store never ran or tracked none
+    bool hotstore_hit_rate(size_t & hits, size_t & total) const;
+
     llama_memory_breakdown memory_breakdown() const;
 
     //

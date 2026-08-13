@@ -550,6 +550,11 @@ void common_perf_print(const struct llama_context * ctx, const struct common_sam
         const double t_unacc_ms = t_total_ms - (t_sampling_ms + data.t_p_eval_ms + data.t_eval_ms);
         const double t_unacc_pc = 100.0 * t_unacc_ms /  t_total_ms;
 
+        size_t eh = 0, et = 0;
+        if (llama_context_hotstore_hit_rate(ctx, &eh, &et) && et > 0) {
+            LOG_INF("hotstore: hit rate %zu/%zu = %.1f%%\n", eh, et, 100.0f * (float) eh / (float) et);
+        }
+
         LOG_INF("%s:        load time = %10.2f ms\n", __func__, data.t_load_ms);
         LOG_INF("%s: prompt eval time = %10.2f ms / %5d tokens (%8.2f ms per token, %8.2f tokens per second)\n",
                 __func__, data.t_p_eval_ms, data.n_p_eval, data.t_p_eval_ms / data.n_p_eval, 1e3 / data.t_p_eval_ms * data.n_p_eval);

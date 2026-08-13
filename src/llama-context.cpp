@@ -492,9 +492,10 @@ llama_context::llama_context(
             LLAMA_LOG_WARN("%s: --expert-hot-split is ignored when --expert-gpu pins a single device\n", __func__);
         }
         const int sync_period = params.expert_sync_period;
+        const bool cold_active = params.expert_cold_s > 0 && params.expert_cold_gpu >= 0;
         expert_hotstore = std::make_unique<llama_expert_hotstore>(
             &model, hparams.n_layer(), hparams.n_expert,
-            params.expert_hot_s, sync_period,
+            params.expert_hot_s, params.expert_cold_s, sync_period,
             params.expert_hyst, params.expert_dwell, params.expert_move_mode,
             params.expert_swaps_per_turn);
         // enable the GPU hot store on any GPU backend (CUDA, Vulkan, ROCm,
@@ -502,18 +503,29 @@ llama_context::llama_context(
         bool cache_enabled = false;
         bool cc_blocked = false;
         std::vector<ggml_backend_buffer_type_t> gpu_bufts;
-        for (auto & backend : backends) {
-            ggml_backend_dev_t dev = ggml_backend_get_device(backend.get());
-            const enum ggml_backend_dev_type type = ggml_backend_dev_type(dev);
-            if (type == GGML_BACKEND_DEVICE_TYPE_CPU || type == GGML_BACKEND_DEVICE_TYPE_ACCEL) {
-                continue;
+        {
+            int dev_idx = 0; // index among GPU (non-CPU/ACCEL) devices
+            for (auto & backend : backends) {
+                ggml_backend_dev_t dev = ggml_backend_get_device(backend.get());
+                const enum ggml_backend_dev_type type = ggml_backend_dev_type(dev);
+                if (type == GGML_BACKEND_DEVICE_TYPE_CPU || type == GGML_BACKEND_DEVICE_TYPE_ACCEL) {
+                    continue;
+                }
+                if (params.expert_gpu >= 0 && dev_idx != params.expert_gpu) {
+                    dev_idx++;
+                    continue; // store pinned to a specific GPU: skip the others
+                }
+                if (cold_active && dev_idx == params.expert_cold_gpu) {
+                    dev_idx++;
+                    continue; // the coldstore owns this GPU: keep it out of the hot store
+                }
+                gpu_bufts.push_back(ggml_backend_get_default_buffer_type(backend.get()));
+                dev_idx++;
             }
-            if (params.expert_gpu >= 0 && (int) gpu_bufts.size() != params.expert_gpu) {
-                continue; // store pinned to a specific GPU: skip the others
-            }
-            gpu_bufts.push_back(ggml_backend_get_default_buffer_type(backend.get()));
         }
-        if (!gpu_bufts.empty()) {
+        if (params.expert_gpu >= 0 && cold_active && params.expert_gpu == params.expert_cold_gpu) {
+            LLAMA_LOG_WARN("%s: --expert-cold-gpu and --expert-gpu target the same device; cold store OFF\n", __func__);
+        } else if (!gpu_bufts.empty()) {
             // compute capability floor: never host the store on too-old GPUs
             // (sm_61 regresses decode; see RFC #25857). LLAMA_EXPERT_FORCE bypasses.
             const int min_cc = llama_expert_preload::gpu_min_cc(params.expert_gpu);
@@ -526,6 +538,34 @@ llama_context::llama_context(
                 // model tensor-split when both are present (-1 = all GPUs)
                 const float * hot_split = params.expert_hot_split_set ? params.expert_hot_split : nullptr;
                 cache_enabled = expert_hotstore->allocate(gpu_bufts, hot_split, (int) gpu_bufts.size(), model.tensor_split(), (int) gpu_bufts.size());
+            }
+        }
+        // coldstore: park the bottom-C experts on the dedicated cold GPU
+        if (cold_active) {
+            if (params.expert_hot_s == 0 || !cache_enabled) {
+                LLAMA_LOG_WARN("%s: cold store OFF: requires the hot store to be active\n", __func__);
+            } else {
+                ggml_backend_buffer_type_t cold_buft = nullptr;
+                {
+                    int dev_idx = 0;
+                    for (auto & backend : backends) {
+                        ggml_backend_dev_t dev = ggml_backend_get_device(backend.get());
+                        const enum ggml_backend_dev_type type = ggml_backend_dev_type(dev);
+                        if (type == GGML_BACKEND_DEVICE_TYPE_CPU || type == GGML_BACKEND_DEVICE_TYPE_ACCEL) {
+                            continue;
+                        }
+                        if (dev_idx == params.expert_cold_gpu) {
+                            cold_buft = ggml_backend_get_default_buffer_type(backend.get());
+                            break;
+                        }
+                        dev_idx++;
+                    }
+                }
+                if (!cold_buft) {
+                    LLAMA_LOG_WARN("%s: cold store OFF: --expert-cold-gpu device not found\n", __func__);
+                } else if (!expert_hotstore->allocate_cold(cold_buft, params.expert_cold_s)) {
+                    LLAMA_LOG_WARN("%s: cold store OFF: allocation failed on the cold device\n", __func__);
+                }
             }
         }
         // launch hint: cache did not engage, usually no GPU accelerator
@@ -1465,6 +1505,7 @@ llm_graph_result * llama_context::process_ubatch(const llama_ubatch & ubatch, ll
     // so the graph never computes against an unverified or corrupted store.
     if (expert_heatmap && expert_hotstore && !expert_hotstore->is_filled) {
         expert_hotstore->copy_top_s(*expert_heatmap);
+        expert_hotstore->copy_cold_bottom_s(*expert_heatmap);
         // move mode: the hot rows now live on the GPU, release their RAM pages
         expert_hotstore->begin_moves();
     }
@@ -3385,6 +3426,15 @@ llama_perf_context_data llama_context::perf_get_data() const {
     return data;
 }
 
+bool llama_context::hotstore_hit_rate(size_t & hits, size_t & total) const {
+    hits = 0;
+    total = 0;
+    if (!expert_hotstore) {
+        return false;
+    }
+    return expert_hotstore->hit_rate_avg(hits, total);
+}
+
 void llama_context::perf_reset() {
     t_start_us  = ggml_time_us();
     t_eval_us   = n_eval = 0;
@@ -3691,6 +3741,8 @@ llama_context_params llama_context_default_params() {
         /*.expert_swaps_per_turn       =*/ 0,
         /*.expert_hot_split            =*/ {0},
         /*.expert_hot_split_set        =*/ false,
+        /*.expert_cold_s               =*/ 0,
+        /*.expert_cold_gpu             =*/ -1,
         /*.ctx_other                   =*/ nullptr,
     };
 
@@ -4304,6 +4356,11 @@ void llama_perf_context_print(const llama_context * ctx) {
 
     const double t_end_ms = 1e-3 * ggml_time_us();
 
+    size_t eh = 0, et = 0;
+    if (ctx && ctx->hotstore_hit_rate(eh, et) && et > 0) {
+        LLAMA_LOG_INFO("hotstore: hit rate %zu/%zu = %.1f%%\n", eh, et, 100.0f * (float) eh / (float) et);
+    }
+
     LLAMA_LOG_INFO("%s:        load time = %10.2f ms\n", __func__, data.t_load_ms);
     LLAMA_LOG_INFO("%s: prompt eval time = %10.2f ms / %5d tokens (%8.2f ms per token, %8.2f tokens per second)\n",
             __func__, data.t_p_eval_ms, data.n_p_eval, data.t_p_eval_ms / data.n_p_eval, 1e3 / data.t_p_eval_ms * data.n_p_eval);
@@ -4315,6 +4372,18 @@ void llama_perf_context_print(const llama_context * ctx) {
 
 void llama_perf_context_reset(llama_context * ctx) {
     ctx->perf_reset();
+}
+
+bool llama_context_hotstore_hit_rate(const llama_context * ctx, size_t * hits, size_t * total) {
+    size_t h = 0, t = 0;
+    const bool ok = ctx && ctx->hotstore_hit_rate(h, t);
+    if (hits) {
+        *hits = h;
+    }
+    if (total) {
+        *total = t;
+    }
+    return ok;
 }
 
 //

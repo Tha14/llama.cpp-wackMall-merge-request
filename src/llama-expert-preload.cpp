@@ -194,7 +194,7 @@ bool is_exps(const char * name, int & layer_idx) {
 }
 
 int register_tensor(const ggml_tensor * src, size_t plane_bytes, int n_experts,
-                    size_t file_off, int fd, const uint8_t * data) {
+                    size_t file_off, int fd, const uint8_t * data, bool file_backed) {
     if (!src || !data || plane_bytes == 0 || n_experts <= 0) {
         return -1; // GPU-resident or degenerate tensor: not host-backed
     }
@@ -204,7 +204,7 @@ int register_tensor(const ggml_tensor * src, size_t plane_bytes, int n_experts,
             return (int) i; // already registered (second load pass)
         }
     }
-    g_entries.push_back({src, plane_bytes, file_off, fd, n_experts});
+    g_entries.push_back({src, plane_bytes, file_off, fd, n_experts, file_backed});
     g_src_idx[src] = g_entries.size() - 1;
     g_hashes.emplace_back((size_t) n_experts, 0);
     const size_t chunk = plane_bytes < 1024 ? plane_bytes : 1024;
@@ -248,6 +248,13 @@ int index_of(const ggml_tensor * src) {
     return -1;
 }
 
+bool is_file_backed(size_t idx) {
+    if (idx >= g_entries.size()) {
+        return false;
+    }
+    return g_entries[idx].file_backed;
+}
+
 uint64_t expected_hash(const ggml_tensor * src, int expert) {
     const int idx = index_of(src);
     if (idx < 0 || expert < 0 || expert >= (int) g_hashes[idx].size()) {
@@ -272,13 +279,20 @@ const uint8_t * cpu_slice(size_t idx, int expert) {
 }
 
 static void release_pages(void * ptr, size_t len) {
-    (void) ptr;
-    (void) len;
 #ifdef _WIN32
-    // Windows maps the gguf tensor payloads into a file mapping; VirtualFree
-    // with MEM_RESET on file-backed pages is undefined and faults later in
-    // memcpy (VCRUNTIME access violation). Keep the RAM copy on Windows.
-    return;
+    // Windows maps the gguf tensor payloads into a file-backed read-only view;
+    // DiscardVirtualMemory (Win8+) drops those cache pages so their RAM is
+    // reclaimed, and re-reads them from the gguf file on the next access. this
+    // is the semantic equivalent of madvise(MADV_DONTNEED) and, unlike
+    // VirtualFree(MEM_RESET), is valid on file-backed sections.
+    if (!ptr || len == 0) {
+        return;
+    }
+    typedef BOOL (WINAPI * pfn_discard)(const void *, SIZE_T);
+    static pfn_discard pDiscardVirtualMemory = (pfn_discard) GetProcAddress(GetModuleHandleA("kernel32.dll"), "DiscardVirtualMemory");
+    if (pDiscardVirtualMemory) {
+        pDiscardVirtualMemory(ptr, len); // best-effort; failure leaves the pages resident
+    }
 #else
     const long page = sysconf(_SC_PAGESIZE);
     const uintptr_t base   = (uintptr_t) ptr;

@@ -139,6 +139,29 @@ std::vector<int> llama_expert_heatmap::get_top_s(int layer_idx, int s) const {
     return result;
 }
 
+std::vector<int> llama_expert_heatmap::get_bottom_s(int layer_idx, int s) const {
+    std::vector<int> result;
+    if (layer_idx < 0 || layer_idx >= n_layers || s <= 0) {
+        return result;
+    }
+
+    const float * layer_heat = heat.data() + layer_idx * n_experts;
+
+    std::vector<int> indices(n_experts);
+    for (int i = 0; i < n_experts; i++) {
+        indices[i] = i;
+    }
+
+    int k = std::min(s, n_experts);
+    std::partial_sort(indices.begin(), indices.begin() + k, indices.end(),
+        [layer_heat](int a, int b) {
+            return layer_heat[a] < layer_heat[b];
+        });
+
+    result.assign(indices.begin(), indices.begin() + k);
+    return result;
+}
+
 bool llama_expert_heatmap::save(const char * path) const {
     FILE * f = fopen(path, "wb");
     if (!f) {

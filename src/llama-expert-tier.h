@@ -21,6 +21,12 @@
 // The result has the same shape as a stock mul_mat_id output and feeds
 // straight back into the caller's downstream ops.
 //
+// The coldstore (--expert-cold-s, parked on a secondary GPU) is weight-only:
+// it holds a copy of the bottom-C experts to relieve host RAM, but the graph
+// never reads it. cold_mask covers those experts too (1), so the CPU cold op
+// computes them from the gguf-backed tensor pages (re-read from the file after
+// they are released in move mode).
+//
 // The per-expert quant scale w_s is discarded on the tiered path. It is an
 // intentional approximation: applying it would add get_rows/mul nodes per
 // layer, and the scale factors are close to 1.

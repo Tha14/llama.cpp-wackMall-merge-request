@@ -1726,6 +1726,8 @@ struct llama_context_params common_context_params_to_llama(const common_params &
     cparams.expert_swaps_per_turn  = params.expert_swaps_per_turn;
     memcpy(cparams.expert_hot_split, params.expert_hot_split, sizeof(params.expert_hot_split));
     cparams.expert_hot_split_set   = params.expert_hot_split_set;
+    cparams.expert_cold_s          = params.expert_cold_s;
+    cparams.expert_cold_gpu        = params.expert_cold_gpu;
     cparams.model_path             = params.model.path.c_str();
 
     return cparams;

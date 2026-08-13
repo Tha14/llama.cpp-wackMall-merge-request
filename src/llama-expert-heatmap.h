@@ -35,6 +35,7 @@ struct llama_expert_heatmap {
 
     float get_score(int layer_idx, int expert_id) const;
     std::vector<int> get_top_s(int layer_idx, int s) const;
+    std::vector<int> get_bottom_s(int layer_idx, int s) const;
 
     // persist the heat to a sidecar file (binary) and restore it on a later
     // run. load() returns false when the file is missing or incompatible
