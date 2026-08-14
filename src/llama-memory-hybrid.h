@@ -127,6 +127,11 @@ public:
     const llama_kv_cache_context * get_attn() const;
     const llama_memory_recurrent_context * get_recr() const;
 
+    // TurboQuant rotation / InnerQ accessors (forward to the attention cache)
+    ggml_tensor * get_turbo_rot_forward() const override;
+    ggml_tensor * get_turbo_rot_inverse() const override;
+    ggml_tensor * get_turbo_innerq_scale_inv() const override;
+
 private:
     // the index of the next ubatch to process
     size_t i_next = 0;
