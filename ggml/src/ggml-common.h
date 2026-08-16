@@ -288,7 +288,7 @@ typedef struct {
 static_assert(sizeof(block_tq2_0) == sizeof(ggml_half) + QK_K / 4, "wrong tq2_0 block size/padding");
 
 //
-// KV-cache rotation quants (TurboQuant/PlanarQuant/IsoQuant)
+// KV-cache rotation quants (TurboQuant)
 //
 
 // TurboQuant 3-bit: 3-bit PolarQuant indices (no QJL)
@@ -320,14 +320,13 @@ static_assert(sizeof(block_turbo3_0) == sizeof(ggml_half) + QK_TURBO3/4 + QK_TUR
 
 #if TURBO4_USE_4BIT
 // 4-bit PolarQuant: 16 optimal centroids, nibble packed, no QJL
-// Per block: norm(fp16) + rnorm(fp16, reserved) + 4-bit indices (64 bytes)
-// = 68 bytes per 128 values = 4.25 bits/value -> 3.8x compression vs fp16
+// Per block: norm(fp16) + 4-bit indices (64 bytes)
+// = 66 bytes per 128 values = 4.125 bpw -> 3.9x compression vs fp16
 typedef struct {
     ggml_half  norm;                    //  2 bytes
-    ggml_half  rnorm;                   //  2 bytes (reserved, unused in 4-bit mode)
     uint8_t    qs[QK_TURBO4 / 2];      // 64 bytes: 4-bit PolarQuant indices (nibble packed)
-} block_turbo4_0;                       // 68 bytes total
-static_assert(sizeof(block_turbo4_0) == 68, "wrong turbo4_0 block size");
+} block_turbo4_0;                       // 66 bytes total (4.125 bpw, dropped dead rnorm)
+static_assert(sizeof(block_turbo4_0) == 66, "wrong turbo4_0 block size");
 #else
 // Legacy 3-bit PolarQuant + 1-bit QJL (original paper design)
 // Per block: norm(fp16) + rnorm(fp16) + 3-bit indices (48 bytes) + 1-bit QJL signs (16 bytes)
@@ -358,40 +357,29 @@ typedef struct {
 } block_turbo2_0;                       // 10 bytes total
 static_assert(sizeof(block_turbo2_0) == sizeof(ggml_half) + QK_TURBO2/4, "wrong turbo2_0 block size/padding");
 
-// PlanarQuant 3-bit: 2D Givens rotation + 2-bit quantized + 1-bit QJL
-// Same block layout as turbo3 (norm + 2-bit indices + 1-bit signs)
-// but uses cos/sin pair rotation instead of WHT
-#define QK_PLANAR3 128
-#define NL_PLANAR3 (QK_PLANAR3 / 16)
-#define NL_PLANAR3_VEC (QK_PLANAR3 / 4)
+// TQ3_1S: WHT-rotated 3-bit weight quantization (8-level Lloyd-Max for N(0,1))
+// Block size 32, dual half-block scales (d0 for [0..15], d1 for [16..31])
+// Per block: d0(fp16) + d1(fp16) + 3-bit indices packed (12 bytes) = 16 bytes per 32 values
+// = 4.0 bits/value
+#define QK_TQ3_0 32
 typedef struct {
-    ggml_half  norm;
-    uint8_t    qs[QK_PLANAR3 / 4];
-    uint8_t    signs[QK_PLANAR3 / 8];
-} block_planar3_0;
-static_assert(sizeof(block_planar3_0) == sizeof(ggml_half) + QK_PLANAR3/4 + QK_PLANAR3/8, "wrong planar3_0 block size/padding");
+    ggml_half d0;                       //  2 bytes: scale for first 16 elements
+    ggml_half d1;                       //  2 bytes: scale for last 16 elements
+    uint8_t   qs[QK_TQ3_0 * 3 / 8];   // 12 bytes: 3-bit indices packed (4 groups of 8 in 3 bytes)
+} block_tq3_1s;                         // 16 bytes total
+static_assert(sizeof(block_tq3_1s) == 16, "wrong tq3_1s block size");
 
-#define QK_ISO3 128
-#define NL_ISO3 (QK_ISO3 / 16)
-#define NL_ISO3_VEC (QK_ISO3 / 4)
+// TQ4_1S: WHT-rotated 4-bit weight quantization (16-level Lloyd-Max for N(0,1))
+// Block size 32, dual half-block scales (d0 for [0..15], d1 for [16..31])
+// Per block: d0(fp16) + d1(fp16) + 4-bit indices packed (16 bytes) = 20 bytes per 32 values
+// = 5.0 bits/value
+#define QK_TQ4_1S 32
 typedef struct {
-    ggml_half  norm;
-    uint8_t    qs[QK_ISO3 / 4];
-    uint8_t    signs[QK_ISO3 / 8];
-} block_iso3_0;
-static_assert(sizeof(block_iso3_0) == sizeof(ggml_half) + QK_ISO3/4 + QK_ISO3/8, "wrong iso3_0 block size/padding");
-
-// PlanarQuant 4-bit and IsoQuant 4-bit: same block layout as turbo4
-// 3-bit indices (nibble-packed) + 1-bit QJL signs + norm
-#define QK_PLANAR4 128
-#define NL_PLANAR4 8
-#define NL_PLANAR4_VEC 32
-#define QK_ISO4 128
-#define NL_ISO4 8
-#define NL_ISO4_VEC 32
-// Reuse block_turbo4_0 layout: these are typedef aliases
-typedef block_turbo4_0 block_planar4_0;
-typedef block_turbo4_0 block_iso4_0;
+    ggml_half d0;                       //  2 bytes: scale for first 16 elements
+    ggml_half d1;                       //  2 bytes: scale for last 16 elements
+    uint8_t   qs[QK_TQ4_1S / 2];      // 16 bytes: 4-bit indices nibble-packed
+} block_tq4_1s;                         // 20 bytes total
+static_assert(sizeof(block_tq4_1s) == 20, "wrong tq4_1s block size");
 
 //
 // Super-block quantization structures

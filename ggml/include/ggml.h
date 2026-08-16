@@ -430,15 +430,12 @@ extern "C" {
         GGML_TYPE_NVFP4   = 40, // NVFP4 (4 blocks, E4M3 scale)
         GGML_TYPE_Q1_0    = 41,
         GGML_TYPE_Q2_0    = 42,
-        // 43..47 reserved for future upstream types
-        GGML_TYPE_TURBO3_0 = 48, // TurboQuant 3-bit KV cache: 2-bit PolarQuant + 1-bit QJL
-        GGML_TYPE_TURBO4_0 = 49, // TurboQuant 4-bit KV cache: 3-bit PolarQuant + 1-bit QJL
-        GGML_TYPE_TURBO2_0 = 50, // TurboQuant 2-bit KV cache: 2-bit PolarQuant (no QJL)
-        GGML_TYPE_PLANAR3_0 = 51, // PlanarQuant 3-bit KV cache: 2D Givens rotation + 2-bit scalar + 1-bit QJL
-        GGML_TYPE_ISO3_0 = 52, // IsoQuant 3-bit KV cache: quaternion 4D rotation + 2-bit scalar + 1-bit QJL
-        GGML_TYPE_PLANAR4_0 = 53, // PlanarQuant 4-bit KV cache: 2D Givens rotation + 3-bit scalar + 1-bit QJL
-        GGML_TYPE_ISO4_0 = 54, // IsoQuant 4-bit KV cache: quaternion 4D rotation + 3-bit scalar + 1-bit QJL
-        GGML_TYPE_COUNT   = 55,
+        GGML_TYPE_TURBO2_0 = 43, // TurboQuant 2-bit KV cache: WHT + 2-bit PolarQuant (runtime-only KV type)
+        GGML_TYPE_TURBO3_0 = 44, // TurboQuant 3-bit KV cache: WHT + 3-bit PolarQuant (runtime-only KV type)
+        GGML_TYPE_TQ3_1S   = 45, // TurboQuant 3-bit weight: WHT-rotated 8-level Lloyd-Max, block_size=32
+        GGML_TYPE_TQ4_1S   = 46, // TurboQuant 4-bit weight: WHT-rotated 16-level Lloyd-Max, block_size=32
+        GGML_TYPE_TURBO4_0 = 47, // TurboQuant 4-bit KV cache: WHT + 4-bit PolarQuant (runtime-only KV type)
+        GGML_TYPE_COUNT    = 48,
     };
 
     // precision

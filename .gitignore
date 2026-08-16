@@ -149,7 +149,11 @@ flake.lock
 # emscripten
 a.out.*
 
-# AGENTS
+# AGENTS, TODO.md and opencode working notes (fork maintainer, never push)
 
+AGENTS.md
 AGENTS.local.md
 .pi/SYSTEM.md
+TODO.md
+.opencode/
+session-*.md
