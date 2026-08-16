@@ -4109,6 +4109,43 @@ struct ggml_tensor * ggml_set_rows(
     return result;
 }
 
+struct ggml_tensor * ggml_set_rows_ordered(
+        struct ggml_context * ctx,
+        struct ggml_tensor  * a,
+        struct ggml_tensor  * b,
+        struct ggml_tensor  * c,
+        struct ggml_tensor  * dependency) {
+    struct ggml_tensor * result = ggml_set_rows(ctx, a, b, c);
+    result->src[5] = dependency;
+    return result;
+}
+
+struct ggml_tensor * ggml_set_rows_with_shadow(
+        struct ggml_context * ctx,
+        struct ggml_tensor  * body,
+        struct ggml_tensor  * source,
+        struct ggml_tensor  * body_indices,
+        struct ggml_tensor  * shadow,
+        struct ggml_tensor  * shadow_indices) {
+    GGML_ASSERT(body->ne[0] == source->ne[0] && shadow->ne[0] == source->ne[0]);
+    GGML_ASSERT(source->ne[1] == body_indices->ne[0] && source->ne[1] == shadow_indices->ne[0]);
+    GGML_ASSERT(source->type == GGML_TYPE_F32);
+    GGML_ASSERT(body_indices->type == GGML_TYPE_I64 && shadow_indices->type == GGML_TYPE_I64);
+    GGML_ASSERT(ggml_is_quantized(body->type));
+    GGML_ASSERT(shadow->type == GGML_TYPE_F16 || shadow->type == GGML_TYPE_BF16);
+    GGML_ASSERT(ggml_is_contiguous_rows(body) && ggml_is_contiguous_rows(source) &&
+            ggml_is_contiguous_rows(shadow));
+
+    struct ggml_tensor * result = ggml_view_tensor(ctx, shadow);
+    result->op = GGML_OP_SET_ROWS;
+    result->src[0] = source;
+    result->src[1] = body_indices;
+    result->src[2] = body;
+    result->src[3] = shadow;
+    result->src[4] = shadow_indices;
+    return result;
+}
+
 // ggml_diag
 
 struct ggml_tensor * ggml_diag(
@@ -5624,6 +5661,87 @@ void ggml_flash_attn_ext_add_sinks(
     GGML_ASSERT(sinks->type == GGML_TYPE_F32);
 
     a->src[4] = sinks;
+}
+
+void ggml_flash_attn_ext_add_kv_tail(
+        struct ggml_tensor * a,
+        struct ggml_tensor * k_tail,
+        struct ggml_tensor * v_tail,
+        struct ggml_tensor * mask_tail,
+        struct ggml_tensor * query_order,
+        struct ggml_tensor * run_desc) {
+    GGML_ASSERT(a != NULL && a->op == GGML_OP_FLASH_ATTN_EXT);
+    GGML_ASSERT(k_tail != NULL && v_tail != NULL && mask_tail != NULL && query_order != NULL && run_desc != NULL);
+    GGML_ASSERT(a->src[5] == NULL && a->src[6] == NULL && a->src[7] == NULL && a->src[8] == NULL && a->src[9] == NULL);
+    GGML_ASSERT((k_tail->type == GGML_TYPE_F32 || k_tail->type == GGML_TYPE_F16 || k_tail->type == GGML_TYPE_BF16) &&
+                (v_tail->type == GGML_TYPE_F32 || v_tail->type == GGML_TYPE_F16 || v_tail->type == GGML_TYPE_BF16));
+    GGML_ASSERT(mask_tail->type == GGML_TYPE_F16);
+    GGML_ASSERT(query_order->type == GGML_TYPE_I32 && query_order->ne[1] == run_desc->ne[1]);
+    GGML_ASSERT(run_desc->type == GGML_TYPE_I32 &&
+            run_desc->ne[0] >= 6 + mask_tail->ne[0] && run_desc->ne[1] > 0);
+
+    a->src[5] = k_tail;
+    a->src[6] = v_tail;
+    a->src[7] = mask_tail;
+    a->src[8] = query_order;
+    a->src[9] = run_desc;
+}
+
+void ggml_flash_attn_ext_set_kv_tail_bodyless(struct ggml_tensor * a) {
+    GGML_ASSERT(a != NULL && a->op == GGML_OP_FLASH_ATTN_EXT);
+    GGML_ASSERT(a->src[5] != NULL && a->src[6] != NULL && a->src[7] != NULL &&
+                a->src[8] != NULL && a->src[9] != NULL);
+    ggml_set_op_params_i32(a, GGML_FLASH_ATTN_EXT_OP_PARAM_TAIL_BODYLESS, 1);
+}
+
+void ggml_flash_attn_ext_set_kv_tail_history_slots(
+        struct ggml_tensor * a,
+        int32_t              history_slots) {
+    GGML_ASSERT(a != NULL && a->op == GGML_OP_FLASH_ATTN_EXT);
+    GGML_ASSERT(a->src[5] != NULL && a->src[6] != NULL && a->src[7] != NULL &&
+                a->src[8] != NULL && a->src[9] != NULL);
+    GGML_ASSERT(history_slots > 0 && history_slots <= a->src[5]->ne[1] &&
+            history_slots <= a->src[6]->ne[1]);
+    ggml_set_op_params_i32(a, GGML_FLASH_ATTN_EXT_OP_PARAM_TAIL_HISTORY_SLOTS, history_slots);
+}
+
+struct ggml_tensor * ggml_kv_tail_attention_merge(
+        struct ggml_context * ctx,
+        struct ggml_tensor  * body_attn,
+        struct ggml_tensor  * k_tail,
+        struct ggml_tensor  * v_tail,
+        struct ggml_tensor  * mask_tail,
+        struct ggml_tensor  * query_order,
+        struct ggml_tensor  * run_desc) {
+    GGML_UNUSED(ctx);
+    GGML_ASSERT(body_attn != NULL && body_attn->op == GGML_OP_FLASH_ATTN_EXT);
+    ggml_flash_attn_ext_add_kv_tail(body_attn, k_tail, v_tail, mask_tail, query_order, run_desc);
+    return body_attn;
+}
+
+struct ggml_tensor * ggml_kv_tail_attention_merge_segmented(
+        struct ggml_context * ctx,
+        struct ggml_tensor  * body_attn,
+        struct ggml_tensor  * k_history,
+        struct ggml_tensor  * v_history,
+        struct ggml_tensor  * k_current,
+        struct ggml_tensor  * v_current,
+        struct ggml_tensor  * mask_tail,
+        struct ggml_tensor  * query_order,
+        struct ggml_tensor  * run_desc) {
+    GGML_UNUSED(ctx);
+    GGML_ASSERT(k_current != NULL && v_current != NULL);
+    GGML_ASSERT(k_history->type == k_current->type && v_history->type == v_current->type);
+    GGML_ASSERT(k_history->ne[0] == k_current->ne[0] &&
+                k_history->ne[2] == k_current->ne[2]);
+    GGML_ASSERT(v_history->ne[0] == v_current->ne[0] &&
+                v_history->ne[2] == v_current->ne[2]);
+    ggml_flash_attn_ext_add_kv_tail(
+            body_attn, k_history, v_history, mask_tail, query_order, run_desc);
+    GGML_ASSERT(body_attn->src[10] == NULL && body_attn->src[11] == NULL);
+    body_attn->src[10] = k_current;
+    body_attn->src[11] = v_current;
+    return body_attn;
 }
 
 // ggml_flash_attn_back

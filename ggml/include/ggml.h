@@ -221,7 +221,7 @@
 
 #define GGML_MAX_DIMS           4
 #define GGML_MAX_PARAMS         2048
-#define GGML_MAX_SRC            10
+#define GGML_MAX_SRC            12
 #define GGML_MAX_N_THREADS      512
 #define GGML_MAX_OP_PARAMS      64
 
@@ -442,6 +442,16 @@ extern "C" {
     enum ggml_prec {
         GGML_PREC_DEFAULT =  0, // stored as ggml_tensor.op_params, 0 by default
         GGML_PREC_F32     = 10,
+    };
+
+    // FLASH_ATTN_EXT op params shared by the generic precision hint and the
+    // exact-KV tail contract. KVARN_DOMAIN is reserved for a KVarN-only domain
+    // contract; keep the index free.
+    enum ggml_flash_attn_ext_op_param {
+        GGML_FLASH_ATTN_EXT_OP_PARAM_PREC              = 3,
+        GGML_FLASH_ATTN_EXT_OP_PARAM_KVARN_DOMAIN      = 4,
+        GGML_FLASH_ATTN_EXT_OP_PARAM_TAIL_BODYLESS     = 5,
+        GGML_FLASH_ATTN_EXT_OP_PARAM_TAIL_HISTORY_SLOTS = 6,
     };
 
     // op hint
@@ -1741,6 +1751,26 @@ extern "C" {
             struct ggml_tensor  * b,  // source
             struct ggml_tensor  * c); // row indices
 
+    // As ggml_set_rows(), with an explicit graph dependency. Negative row
+    // indices are ignored, allowing ragged updates without persistent sink
+    // rows. The dependency affects ordering only and is not read by backends.
+    GGML_API struct ggml_tensor * ggml_set_rows_ordered(
+            struct ggml_context * ctx,
+            struct ggml_tensor  * a,
+            struct ggml_tensor  * b,
+            struct ggml_tensor  * c,
+            struct ggml_tensor  * dependency);
+
+    // Stores the same source rows into a body destination and an exact shadow
+    // destination in one backend operation. The result aliases shadow.
+    GGML_API struct ggml_tensor * ggml_set_rows_with_shadow(
+            struct ggml_context * ctx,
+            struct ggml_tensor  * body,
+            struct ggml_tensor  * source,
+            struct ggml_tensor  * body_indices,
+            struct ggml_tensor  * shadow,
+            struct ggml_tensor  * shadow_indices);
+
     GGML_API struct ggml_tensor * ggml_diag(
         struct ggml_context     * ctx,
         struct ggml_tensor      * a);
@@ -2481,6 +2511,53 @@ extern "C" {
     GGML_API void ggml_flash_attn_ext_add_sinks(
             struct ggml_tensor * a,
             struct ggml_tensor * sinks);
+
+    // Attach per-sequence exact-KV arenas to an existing body FlashAttention
+    // operation. query_order packs caller queries in sequence-major order and
+    // run_desc records { arena, packed start, query count, consecutive run }.
+    // Backends compute both partials privately and publish one normalized dst.
+    GGML_API void ggml_flash_attn_ext_add_kv_tail(
+            struct ggml_tensor * a,
+            struct ggml_tensor * k_tail,
+            struct ggml_tensor * v_tail,
+            struct ggml_tensor * mask_tail,
+            struct ggml_tensor * query_order,
+            struct ggml_tensor * run_desc);
+
+    // Declare that the attached exact tail is the complete attention source.
+    // Backends may skip the masked dummy body and execute the packed exact
+    // source as one ordinary FlashAttention pass.
+    GGML_API void ggml_flash_attn_ext_set_kv_tail_bodyless(
+            struct ggml_tensor * a);
+
+    // Set the logical persistent-history boundary for segmented exact tails.
+    // The physical tensor may include backend execution padding beyond it.
+    GGML_API void ggml_flash_attn_ext_set_kv_tail_history_slots(
+            struct ggml_tensor * a,
+            int32_t              history_slots);
+
+    GGML_API struct ggml_tensor * ggml_kv_tail_attention_merge(
+            struct ggml_context * ctx,
+            struct ggml_tensor  * body_attn,
+            struct ggml_tensor  * k_tail,
+            struct ggml_tensor  * v_tail,
+            struct ggml_tensor  * mask_tail,
+            struct ggml_tensor  * query_order,
+            struct ggml_tensor  * run_desc);
+
+    // Attach a compact exact source without materializing history and current
+    // rows into one tensor. Tail indices address history first and then the
+    // graph-local current rows.
+    GGML_API struct ggml_tensor * ggml_kv_tail_attention_merge_segmented(
+            struct ggml_context * ctx,
+            struct ggml_tensor  * body_attn,
+            struct ggml_tensor  * k_history,
+            struct ggml_tensor  * v_history,
+            struct ggml_tensor  * k_current,
+            struct ggml_tensor  * v_current,
+            struct ggml_tensor  * mask_tail,
+            struct ggml_tensor  * query_order,
+            struct ggml_tensor  * run_desc);
 
     // TODO: needs to be adapted to ggml_flash_attn_ext
     GGML_API struct ggml_tensor * ggml_flash_attn_back(

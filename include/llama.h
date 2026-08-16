@@ -349,6 +349,20 @@ extern "C" {
         struct llama_sampler * sampler;
     };
 
+    enum llama_kv_tail_coverage_state {
+        LLAMA_KV_TAIL_COVERAGE_NONE,
+        LLAMA_KV_TAIL_COVERAGE_PARTIAL,
+        LLAMA_KV_TAIL_COVERAGE_COMPLETE,
+    };
+
+    enum llama_kv_tail_degradation_flags {
+        LLAMA_KV_TAIL_DEGRADED_NONE            = 0,
+        LLAMA_KV_TAIL_DEGRADED_BODY_ONLY_STATE = 1 << 0,
+        LLAMA_KV_TAIL_DEGRADED_HISTORICAL_OP   = 1 << 1,
+        LLAMA_KV_TAIL_DEGRADED_STATE_RESTORE   = 1 << 2,
+        LLAMA_KV_TAIL_DEGRADED_PAYLOAD_INVALID = 1 << 3,
+    };
+
     // NOTE: changing the default values of parameters marked as [EXPERIMENTAL] may cause crashes or incorrect results in certain configurations
     //       https://github.com/ggml-org/llama.cpp/pull/7544
     struct llama_context_params {
