@@ -1241,7 +1241,7 @@ static const char * GGML_OP_SYMBOL[GGML_OP_COUNT] = {
     "dsv4_hc_comb(mixes, scale, base)",
     "dsv4_hc_pre(x, weights)",
     "dsv4_hc_post(x, residual, post, comb)",
-    "turbo_wht(a)",
+"turbo_wht(a)",
 
     "unary(x)",
 
@@ -4039,16 +4039,21 @@ struct ggml_tensor * ggml_get_rows(
         struct ggml_context * ctx,
         struct ggml_tensor  * a,
         struct ggml_tensor  * b) {
+    enum ggml_type type = a->type == GGML_TYPE_I32 ? GGML_TYPE_I32 : GGML_TYPE_F32;
+    return ggml_get_rows_as(ctx, a, b, type);
+}
+
+struct ggml_tensor * ggml_get_rows_as(
+        struct ggml_context * ctx,
+        struct ggml_tensor  * a,
+        struct ggml_tensor  * b,
+        enum ggml_type        type) {
     GGML_ASSERT(a->ne[2] == b->ne[1]);
     GGML_ASSERT(a->ne[3] == b->ne[2]);
     GGML_ASSERT(b->ne[3] == 1);
     GGML_ASSERT(b->type == GGML_TYPE_I32);
 
-    // TODO: implement non F32 return
-    enum ggml_type type = GGML_TYPE_F32;
-    if (a->type == GGML_TYPE_I32) {
-        type = a->type;
-    }
+    GGML_ASSERT(type == GGML_TYPE_F32 || type == GGML_TYPE_F16 || type == GGML_TYPE_BF16 || type == GGML_TYPE_I32);
     struct ggml_tensor * result = ggml_new_tensor_4d(ctx, type, a->ne[0], b->ne[0], b->ne[1], b->ne[2]);
 
     result->op     = GGML_OP_GET_ROWS;
@@ -5623,7 +5628,6 @@ struct ggml_tensor * ggml_flash_attn_ext(
     result->src[1] = k;
     result->src[2] = v;
     result->src[3] = mask;
-
     return result;
 }
 
@@ -5635,7 +5639,7 @@ void ggml_flash_attn_ext_set_prec(
 
     const int32_t prec_i32 = (int32_t) prec;
 
-    ggml_set_op_params_i32(a, 3, prec_i32); // scale is on first pos, max_bias on second
+    ggml_set_op_params_i32(a, GGML_FLASH_ATTN_EXT_OP_PARAM_PREC, prec_i32); // scale is on first pos, max_bias on second
 }
 
 enum ggml_prec ggml_flash_attn_ext_get_prec(

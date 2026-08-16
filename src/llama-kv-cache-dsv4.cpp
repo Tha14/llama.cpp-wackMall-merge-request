@@ -1450,6 +1450,14 @@ bool llama_kv_cache_dsv4::seq_rm(llama_seq_id seq_id, llama_pos p0, llama_pos p1
     return res;
 }
 
+bool llama_kv_cache_dsv4::seq_rm_cell(llama_seq_id seq_id, uint32_t cell_idx) {
+    return kv_raw->seq_rm_cell(seq_id, cell_idx);
+}
+
+int llama_kv_cache_dsv4::cells_at_pos(llama_seq_id seq_id, llama_pos pos, uint32_t * cell_indices, int n_max) {
+    return kv_raw->cells_at_pos(seq_id, pos, cell_indices, n_max);
+}
+
 void llama_kv_cache_dsv4::seq_cp(llama_seq_id seq_id_src, llama_seq_id seq_id_dst, llama_pos p0, llama_pos p1) {
     GGML_ASSERT(p0 <= 0 && p1 < 0 && "DSV4 only supports full sequence copies");
 

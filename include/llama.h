@@ -363,6 +363,13 @@ extern "C" {
         LLAMA_KV_TAIL_DEGRADED_PAYLOAD_INVALID = 1 << 3,
     };
 
+    struct llama_kv_tail_coverage_info {
+        enum llama_kv_tail_coverage_state state;
+        uint32_t requested;
+        uint32_t exact;
+        uint32_t degradation_flags;
+    };
+
     // NOTE: changing the default values of parameters marked as [EXPERIMENTAL] may cause crashes or incorrect results in certain configurations
     //       https://github.com/ggml-org/llama.cpp/pull/7544
     struct llama_context_params {
@@ -944,6 +951,15 @@ extern "C" {
 // Keeps the tensor data on device buffers (i.e. not accessible in host memory, but faster save/load).
 // Getting the state for a seq_id with this flag invalidates all prior states gotten for that seq_id with this flag.
 #define LLAMA_STATE_SEQ_FLAGS_ON_DEVICE 2
+
+// Deliberately export only the complete ordinary cache body. Loading into a
+// tail-enabled context starts with degraded exact-tail coverage.
+#define LLAMA_STATE_SEQ_FLAGS_BODY_ONLY 4
+
+// Export a self-contained logical sequence from a shared physical cache.
+// Unlike PARTIAL_ONLY, this representation owns every payload required after
+// the source sequence is removed and may remap physical cells on restore.
+#define LLAMA_STATE_SEQ_FLAGS_SELF_CONTAINED 8
 
     typedef uint32_t llama_state_seq_flags;
 

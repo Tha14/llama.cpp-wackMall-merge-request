@@ -454,6 +454,13 @@ extern "C" {
         GGML_FLASH_ATTN_EXT_OP_PARAM_TAIL_HISTORY_SLOTS = 6,
     };
 
+    enum ggml_flash_attn_ext_kvarn_domain {
+        GGML_FLASH_ATTN_EXT_KVARN_DOMAIN_AUTO                 = 0,
+        GGML_FLASH_ATTN_EXT_KVARN_DOMAIN_ROTATED              = 1,
+        GGML_FLASH_ATTN_EXT_KVARN_DOMAIN_ORIGINAL             = 2,
+        GGML_FLASH_ATTN_EXT_KVARN_DOMAIN_ROTATED_K_ORIGINAL_V = 3,
+    };
+
     // op hint
     enum ggml_op_hint {
         GGML_HINT_NONE             = 0,
@@ -1728,6 +1735,12 @@ extern "C" {
             struct ggml_tensor  * a,  // data
             struct ggml_tensor  * b); // row indices
 
+    GGML_API struct ggml_tensor * ggml_get_rows_as(
+            struct ggml_context * ctx,
+            struct ggml_tensor  * a,
+            struct ggml_tensor  * b,
+            enum ggml_type        type);
+
     GGML_API struct ggml_tensor * ggml_get_rows_back(
             struct ggml_context * ctx,
             struct ggml_tensor  * a,  // gradients of ggml_get_rows result
@@ -2703,8 +2716,54 @@ extern "C" {
             struct ggml_tensor  * v,
             struct ggml_tensor  * g,
             struct ggml_tensor  * beta,
-            struct ggml_tensor  * state,
-            int64_t               K);
+             struct ggml_tensor  * state,
+             int64_t               K);
+
+    // KVarN normalized Sylvester Walsh-Hadamard transform for 128/256/512
+    // head widths.  The transform is self-inverse.
+    GGML_API struct ggml_tensor * ggml_kvarn_wht(
+            struct ggml_context * ctx,
+            struct ggml_tensor  * a,
+            int                   head_width);
+
+    // KVarN structured KV-cache operations.  Records span full 128-token
+    // tiles, so this deliberately remains separate from ggml_type.
+    GGML_API struct ggml_tensor * ggml_kvarn_store(
+            struct ggml_context * ctx,
+            struct ggml_tensor  * current,
+            struct ggml_tensor  * indices,
+            struct ggml_tensor  * stage,
+            struct ggml_tensor  * records,
+            int                   bits,
+            int                   sinkhorn_iters,
+            bool                  value,
+            int                   stage_groups);
+
+    GGML_API struct ggml_tensor * ggml_kvarn_view(
+            struct ggml_context * ctx,
+            struct ggml_tensor  * records,
+            struct ggml_tensor  * stage_after_store,
+            struct ggml_tensor  * indices,
+            int                   n_kv,
+            int                   stream_start,
+            int                   n_stream,
+            int                   bits,
+            bool                  value,
+            int                   stage_groups);
+
+    // Reconstructs a standard F16 tensor from KVarN records and staging. The
+    // result can be consumed by any ordinary attention implementation.
+    GGML_API struct ggml_tensor * ggml_kvarn_materialize(
+            struct ggml_context * ctx,
+            struct ggml_tensor  * records,
+            struct ggml_tensor  * stage_after_store,
+            struct ggml_tensor  * indices,
+            int                   n_kv,
+            int                   stream_start,
+            int                   n_stream,
+            int                   bits,
+            bool                  value,
+            int                   stage_groups);
 
     // DSA lightning indexer
     //

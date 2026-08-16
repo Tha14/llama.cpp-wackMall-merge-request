@@ -2825,10 +2825,7 @@ public:
     llama_io_read_host(const uint8_t * p, size_t len) : ptr(p), buf_size(len) {}
 
     ~llama_io_read_host() {
-        // flush the reads
-        for (const auto & rinfo : rinfos) {
-            ggml_backend_tensor_set(rinfo.tensor, rinfo.ptr, rinfo.offset, rinfo.size);
-        }
+        cancel();
     }
 
     void read(void * dst, size_t size) override {
@@ -2846,12 +2843,46 @@ public:
             throw std::runtime_error("unexpectedly reached end of buffer");
         }
 
-        // save for later during destruction
-        rinfos.push_back({tensor, ptr, size, offset});
+        rinfos.push_back({tensor, ptr, {}, size, offset, false});
 
         ptr += size;
         size_read += size;
         buf_size -= size;
+    }
+
+    void stage_tensor_set(ggml_tensor * tensor, const void * src, size_t offset, size_t size) override {
+        read_info info { tensor, nullptr, {}, size, offset, false };
+        info.owned.resize(size);
+        memcpy(info.owned.data(), src, size);
+        rinfos.push_back(std::move(info));
+    }
+
+    void stage_tensor_clear(ggml_tensor * tensor, size_t offset, size_t size) override {
+        rinfos.push_back({ tensor, nullptr, {}, size, offset, true });
+    }
+
+    void on_commit(std::function<void()> callback) override {
+        callbacks.push_back(std::move(callback));
+    }
+
+    void commit() override {
+        for (const auto & rinfo : rinfos) {
+            if (rinfo.clear) {
+                ggml_backend_tensor_memset(rinfo.tensor, 0, rinfo.offset, rinfo.size);
+            } else {
+                const void * src = rinfo.owned.empty() ? rinfo.ptr : rinfo.owned.data();
+                ggml_backend_tensor_set(rinfo.tensor, src, rinfo.offset, rinfo.size);
+            }
+        }
+        for (auto & callback : callbacks) {
+            callback();
+        }
+        cancel();
+    }
+
+    void cancel() override {
+        rinfos.clear();
+        callbacks.clear();
     }
 
     size_t n_bytes() override {
@@ -2866,10 +2897,13 @@ private:
     struct read_info {
         ggml_tensor * tensor;
         const uint8_t * ptr;
+        std::vector<uint8_t> owned;
         size_t size;
         size_t offset;
+        bool clear;
     };
     std::vector<read_info> rinfos;
+    std::vector<std::function<void()>> callbacks;
 };
 
 class llama_io_write_file : public llama_io_write_i {
@@ -2901,15 +2935,54 @@ class llama_io_read_file : public llama_io_read_i {
 public:
     llama_io_read_file(llama_file * f) : file(f) {}
 
+    ~llama_io_read_file() {
+        cancel();
+    }
+
     void read(void * dst, size_t size) override {
         file->read_raw(dst, size);
         size_read += size;
     }
 
     void read_tensor(ggml_tensor * tensor, size_t offset, size_t size) override {
-        temp_buffer.resize(size);
-        read(temp_buffer.data(), size);
-        ggml_backend_tensor_set(tensor, temp_buffer.data(), offset, size);
+        read_info info { tensor, {}, size, offset, false };
+        info.data.resize(size);
+        read(info.data.data(), size);
+        rinfos.push_back(std::move(info));
+    }
+
+    void stage_tensor_set(ggml_tensor * tensor, const void * src, size_t offset, size_t size) override {
+        read_info info { tensor, {}, size, offset, false };
+        info.data.resize(size);
+        memcpy(info.data.data(), src, size);
+        rinfos.push_back(std::move(info));
+    }
+
+    void stage_tensor_clear(ggml_tensor * tensor, size_t offset, size_t size) override {
+        rinfos.push_back({ tensor, {}, size, offset, true });
+    }
+
+    void on_commit(std::function<void()> callback) override {
+        callbacks.push_back(std::move(callback));
+    }
+
+    void commit() override {
+        for (const auto & rinfo : rinfos) {
+            if (rinfo.clear) {
+                ggml_backend_tensor_memset(rinfo.tensor, 0, rinfo.offset, rinfo.size);
+            } else {
+                ggml_backend_tensor_set(rinfo.tensor, rinfo.data.data(), rinfo.offset, rinfo.size);
+            }
+        }
+        for (auto & callback : callbacks) {
+            callback();
+        }
+        cancel();
+    }
+
+    void cancel() override {
+        rinfos.clear();
+        callbacks.clear();
     }
 
     size_t n_bytes() override {
@@ -2919,7 +2992,16 @@ public:
 private:
     llama_file * file;
     size_t size_read = 0;
-    std::vector<uint8_t> temp_buffer;
+
+    struct read_info {
+        ggml_tensor * tensor;
+        std::vector<uint8_t> data;
+        size_t size;
+        size_t offset;
+        bool clear;
+    };
+    std::vector<read_info> rinfos;
+    std::vector<std::function<void()>> callbacks;
 };
 
 class llama_io_write_device : public llama_io_write_i {
@@ -3060,6 +3142,10 @@ public:
     }
 
     ~llama_io_read_device() {
+        cancel();
+    }
+
+    void commit() override {
         llama_memory_buffers mbufs_new;
 
         for (const auto & rinfo : rinfos) {
@@ -3084,7 +3170,8 @@ public:
         for (const auto & rinfo : rinfos) {
             auto * buft = ggml_backend_buffer_get_type(rinfo.tensor->buffer);
 
-            const int64_t n = rinfo.size/ggml_element_size(rinfo.tensor);
+            GGML_ASSERT(rinfo.size % ggml_type_size(rinfo.tensor->type) == 0);
+            const int64_t n = (rinfo.size/ggml_type_size(rinfo.tensor->type))*ggml_blck_size(rinfo.tensor->type);
 
             auto & mbuf = mbufs_new[buft];
 
@@ -3106,6 +3193,18 @@ public:
         }
 
         GGML_ASSERT(buf_size == 0);
+
+        for (const auto & operation : host_operations) {
+            if (operation.clear) {
+                ggml_backend_tensor_memset(operation.tensor, 0, operation.offset, operation.size);
+            } else {
+                ggml_backend_tensor_set(operation.tensor, operation.data.data(), operation.offset, operation.size);
+            }
+        }
+        for (auto & callback : callbacks) {
+            callback();
+        }
+        cancel();
     }
 
     void read(void * dst, size_t size) override {
@@ -3119,8 +3218,28 @@ public:
     }
 
     void read_tensor(ggml_tensor * tensor, size_t offset, size_t size) override {
-        // save for later during destruction
         rinfos.push_back({tensor, ptr, size, offset});
+    }
+
+    void stage_tensor_set(ggml_tensor * tensor, const void * src, size_t offset, size_t size) override {
+        host_operation operation { tensor, {}, size, offset, false };
+        operation.data.resize(size);
+        memcpy(operation.data.data(), src, size);
+        host_operations.push_back(std::move(operation));
+    }
+
+    void stage_tensor_clear(ggml_tensor * tensor, size_t offset, size_t size) override {
+        host_operations.push_back({ tensor, {}, size, offset, true });
+    }
+
+    void on_commit(std::function<void()> callback) override {
+        callbacks.push_back(std::move(callback));
+    }
+
+    void cancel() override {
+        rinfos.clear();
+        host_operations.clear();
+        callbacks.clear();
     }
 
     size_t n_bytes() override {
@@ -3139,6 +3258,16 @@ private:
         size_t offset;
     };
     std::vector<read_info> rinfos;
+
+    struct host_operation {
+        ggml_tensor * tensor;
+        std::vector<uint8_t> data;
+        size_t size;
+        size_t offset;
+        bool clear;
+    };
+    std::vector<host_operation> host_operations;
+    std::vector<std::function<void()>> callbacks;
 
     const llama_memory_buffers & mbufs;
 };

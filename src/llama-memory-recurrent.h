@@ -43,7 +43,12 @@ public:
 
     void clear(bool data) override;
 
+    bool can_seq_rm(llama_seq_id seq_id, llama_pos p0, llama_pos p1) const override;
     bool seq_rm  (llama_seq_id seq_id,                              llama_pos p0, llama_pos p1) override;
+    bool seq_rm_cell(llama_seq_id seq_id, uint32_t cell_idx) override;
+
+    int cells_at_pos(llama_seq_id seq_id, llama_pos pos, uint32_t * cell_indices, int n_max) override;
+
     void seq_cp  (llama_seq_id seq_id_src, llama_seq_id seq_id_dst, llama_pos p0, llama_pos p1) override;
     void seq_keep(llama_seq_id seq_id)                                                          override;
     void seq_add (llama_seq_id seq_id,                              llama_pos p0, llama_pos p1, llama_pos shift) override;
@@ -60,6 +65,7 @@ public:
     bool find_slot(const llama_ubatch & ubatch);
 
     bool get_can_shift() const override;
+    seq_rm_capability get_seq_rm_capability() const override;
 
     // state write/load
 
@@ -121,6 +127,8 @@ private:
     // ggml contexts for the KV cache along with the allocated backend buffers:
     std::vector<std::pair<ggml_context_ptr, ggml_backend_buffer_ptr>> ctxs_bufs;
 
+    bool resize(uint32_t new_mem_size);
+
     size_t total_size() const;
 
     size_t size_r_bytes() const;
@@ -130,7 +138,8 @@ private:
     void state_write_data(llama_io_write_i & io, const std::vector<std::pair<uint32_t, uint32_t>> & cell_ranges) const;
 
     bool state_read_meta(llama_io_read_i & io, uint32_t cell_count, llama_seq_id dest_seq_id = -1);
-    bool state_read_data(llama_io_read_i & io, uint32_t cell_count);
+    bool state_read_data(llama_io_read_i & io, uint32_t cell_count, uint32_t restore_head);
+
 };
 
 class llama_memory_recurrent_context : public llama_memory_context_i {

@@ -2,6 +2,7 @@
 
 #include "llama.h"
 #include "llama-graph.h"
+#include "llama-kv-memory-stats.h"
 
 #include <map>
 #include <memory>
@@ -73,6 +74,12 @@ struct llama_memory_context_i {
     // TurboQuant InnerQ: get per-channel scale_inv tensor for Q/V equalization
     // Returns nullptr when InnerQ is not active. Override in KV cache contexts.
     virtual ggml_tensor * get_turbo_innerq_scale_inv() const { return nullptr; }
+
+    // Compact cache metadata is prepared by apply(), but is not authoritative
+    // until the graph finishes. Wrappers must forward both hooks to their
+    // participating child contexts.
+    virtual void graph_compute_start() {}
+    virtual void graph_compute_finish(ggml_status /* status */) {}
 };
 
 using llama_memory_context_ptr = std::unique_ptr<llama_memory_context_i>;
@@ -116,7 +123,40 @@ struct llama_memory_i {
     // if data == true, the data buffers will also be cleared together with the metadata
     virtual void clear(bool data) = 0;
 
+    virtual bool can_seq_rm(llama_seq_id seq_id, llama_pos p0, llama_pos p1) const {
+        GGML_UNUSED(seq_id);
+        GGML_UNUSED(p0);
+        GGML_UNUSED(p1);
+        return true;
+    }
+
+    struct seq_rm_capability {
+        bool full_clear = true;
+        bool arbitrary_ranges = true;
+        uint32_t suffix_rollback_tokens = UINT32_MAX;
+    };
+
+    virtual seq_rm_capability get_seq_rm_capability() const { return {}; }
+
+    virtual bool seq_rm_plan(
+            llama_seq_id seq_id, llama_pos p0, llama_pos p1,
+            llama_pos & planned_p0, llama_pos & planned_p1) const {
+        if (!can_seq_rm(seq_id, p0, p1)) {
+            return false;
+        }
+        planned_p0 = p0;
+        planned_p1 = p1;
+        return true;
+    }
+
     virtual bool seq_rm  (llama_seq_id seq_id,                              llama_pos p0, llama_pos p1) = 0;
+    virtual bool seq_rm_cell(llama_seq_id seq_id, uint32_t cell_idx) = 0;
+
+    // Return the number of KV cells at a given position for a seq_id.
+    // If cell_indices is not NULL and n_max > 0, fill cell_indices with up to n_max cell indices.
+    // Returns the total number of cells at the position (may exceed n_max).
+    virtual int cells_at_pos(llama_seq_id seq_id, llama_pos pos, uint32_t * cell_indices, int n_max) = 0;
+
     virtual void seq_cp  (llama_seq_id seq_id_src, llama_seq_id seq_id_dst, llama_pos p0, llama_pos p1) = 0;
     virtual void seq_keep(llama_seq_id seq_id) = 0;
     virtual void seq_add (llama_seq_id seq_id,                              llama_pos p0, llama_pos p1, llama_pos shift) = 0;
@@ -127,12 +167,105 @@ struct llama_memory_i {
 
     virtual std::map<ggml_backend_buffer_type_t, size_t> memory_breakdown() const = 0;
 
+    virtual llama_kv_memory_stats kv_memory_stats() const { return {}; }
+    virtual ggml_type get_kv_tail_type() const { return GGML_TYPE_COUNT; }
+
+    virtual uint32_t get_kv_tail_group_count() const { return 0; }
+    virtual bool get_kv_tail_coverage(
+            uint32_t /* group_index */,
+            llama_seq_id /* seq_id */,
+            llama_kv_tail_coverage_info & /* out */) const { return false; }
+    virtual void reset_kv_tail_planner_timing() {}
+    virtual uint64_t get_kv_tail_planner_timing_ns() const { return 0; }
+
     //
     // state write/read
     //
 
+    // Some compact attention memories cannot be recovered from a later live state
+    // by trimming arbitrary suffixes, so composite memories must include them
+    // even when LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY is requested.
+    virtual bool requires_state_for_partial_restore() const { return false; }
+
+    // Per-sequence state operations must not snapshot or overwrite physical data
+    // owned by another live logical sequence. Composite memories must forward both
+    // direction-specific queries to every participating child.
+    virtual bool state_seq_can_save(llama_seq_id seq_id) const {
+        return seq_id >= 0;
+    }
+    virtual bool state_seq_can_restore(llama_seq_id seq_id) const {
+        return seq_id >= 0;
+    }
+    virtual bool state_seq_can_save(llama_seq_id seq_id, llama_state_seq_flags flags) const {
+        GGML_UNUSED(flags);
+        return state_seq_can_save(seq_id);
+    }
+    virtual bool state_seq_can_restore(llama_seq_id seq_id, llama_state_seq_flags flags) const {
+        GGML_UNUSED(flags);
+        return state_seq_can_restore(seq_id);
+    }
+
     virtual void state_write(llama_io_write_i & io, llama_seq_id seq_id = -1, llama_state_seq_flags flags = 0) const = 0;
     virtual void state_read (llama_io_read_i  & io, llama_seq_id seq_id = -1, llama_state_seq_flags flags = 0) = 0;
+
+    virtual uint32_t get_kv_n_stream() const { return 0; }
+    virtual uint32_t get_kv_size() const { return 0; }
+    virtual llama_memory_context_ptr init_kv_batch(const std::vector<llama_ubatch> & /* ubatches */) { return nullptr; }
 };
+
+inline bool llama_memory_seq_rm_plan_all(
+        llama_seq_id seq_id, llama_pos p0, llama_pos p1,
+        std::initializer_list<const llama_memory_i *> children,
+        llama_pos & planned_p0, llama_pos & planned_p1) {
+    if (children.size() == 0) {
+        return false;
+    }
+
+    llama_pos common_p0 = p0;
+    llama_pos common_p1 = p1;
+    for (const llama_memory_i * child : children) {
+        llama_pos child_p0 = p0;
+        llama_pos child_p1 = p1;
+        if (child == nullptr || !child->seq_rm_plan(seq_id, p0, p1, child_p0, child_p1)) {
+            return false;
+        }
+        if (p1 < 0) {
+            if (child_p1 >= 0) {
+                return false;
+            }
+            if (child_p0 < common_p0) {
+                common_p0 = child_p0;
+            }
+        } else if (child_p0 != p0 || child_p1 != p1) {
+            return false;
+        }
+    }
+
+    for (const llama_memory_i * child : children) {
+        if (!child->can_seq_rm(seq_id, common_p0, common_p1)) {
+            return false;
+        }
+    }
+
+    planned_p0 = common_p0;
+    planned_p1 = common_p1;
+    return true;
+}
+
+inline llama_memory_i::seq_rm_capability llama_memory_seq_rm_capability_all(
+        std::initializer_list<const llama_memory_i *> children) {
+    llama_memory_i::seq_rm_capability result;
+    for (const llama_memory_i * child : children) {
+        if (!child) {
+            return { false, false, 0 };
+        }
+        const auto capability = child->get_seq_rm_capability();
+        result.full_clear = result.full_clear && capability.full_clear;
+        result.arbitrary_ranges = result.arbitrary_ranges && capability.arbitrary_ranges;
+        result.suffix_rollback_tokens = std::min(
+                result.suffix_rollback_tokens, capability.suffix_rollback_tokens);
+    }
+    return result;
+}
 
 using llama_memory_ptr = std::unique_ptr<llama_memory_i>;
