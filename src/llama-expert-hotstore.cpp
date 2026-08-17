@@ -76,7 +76,8 @@ static const std::regex g_re_exps_weight("blk\\.(\\d+)\\.ffn_(up|down|gate|gate_
 
 llama_expert_hotstore::llama_expert_hotstore(
         const llama_model * model, int n_layers, int n_experts, int hot_s, int cold_s, int sync_period,
-        float hyst, int dwell, int mode, int swaps_per_turn) :
+        float hyst, int dwell, int mode, int swaps_per_turn,
+        int boot_tokens, int cold_dwell_min, int cold_sync_step) :
     n_layers(n_layers),
     n_experts(n_experts),
     hot_s(hot_s),
@@ -86,7 +87,10 @@ llama_expert_hotstore::llama_expert_hotstore(
     hyst(hyst),
     dwell(dwell),
     mode(mode),
-    swaps_per_turn(swaps_per_turn) {
+    swaps_per_turn(swaps_per_turn),
+    boot_tokens(boot_tokens),
+    cold_sync_step(cold_sync_step),
+    cold_dwell_min(cold_dwell_min) {
     if (n_layers <= 0) {
         return;
     }
@@ -562,6 +566,7 @@ bool llama_expert_hotstore::resync_full_mirror(const llama_expert_heatmap & heat
             }
         }
         const std::vector<int> top = heatmap.get_top_s(il, hot_s);
+        const int eff_dwell = in_boot(heatmap) ? 0 : dwell;
 
         auto find_slot = [&](int e_cold) -> int {
             for (int p = 0; p < hot_s; p++) {
@@ -576,7 +581,7 @@ bool llama_expert_hotstore::resync_full_mirror(const llama_expert_heatmap & heat
                 if (ste[p] < 0) {
                     continue;
                 }
-                if (dc[p] < dwell) {
+                if (dc[p] < eff_dwell) {
                     continue;
                 }
                 if (s_cold >= hyst * heatmap.get_score(il, ste[p])) {
@@ -678,6 +683,9 @@ bool llama_expert_hotstore::resync_top_s(const llama_expert_heatmap & heatmap, i
     const double t0 = ggml_time_us();
     // tokens elapsed since the previous sync, used to age dwell counters
     const int64_t elapsed = heatmap.tokens_total - last_sync_tokens;
+    // fast-start converge: inside the boot phase the dwell gates are off so a
+    // freshly placed expert can already be replaced by a hotter one
+    const int eff_dwell = in_boot(heatmap) ? 0 : dwell;
     int changed = 0;
     int moved = 0; // placement changes counted toward the swap budget
     bool done = false; // swap budget exhausted: stop touching further layers
@@ -911,7 +919,7 @@ bool llama_expert_hotstore::resync_top_s(const llama_expert_heatmap & heatmap, i
                             break;
                         }
                     }
-                    if (p < 0 || dc[p] < dwell) {
+                    if (p < 0 || dc[p] < eff_dwell) {
                         continue; // not an applicant yet
                     }
                     if (highest_cpu >= hyst * heatmap.get_score(il, e)) {
@@ -960,7 +968,7 @@ bool llama_expert_hotstore::resync_top_s(const llama_expert_heatmap & heatmap, i
             if (worst_slot < 0 || worst_bound <= 0.0f) {
                 continue; // dead resident (no heat yet); eviction will clear it
             }
-            if (dc[worst_slot] < dwell + 2) {
+            if (dc[worst_slot] < eff_dwell + 2) {
                 continue; // not aged enough since its last change
             }
             int   best_slot  = -1;
@@ -1092,11 +1100,17 @@ bool llama_expert_hotstore::resync_top_s(const llama_expert_heatmap & heatmap, i
     return changed > 0;
 }
 
+bool llama_expert_hotstore::in_boot(const llama_expert_heatmap & heatmap) const {
+    return boot_tokens > 0 && heatmap.generated_tokens_count < boot_tokens;
+}
+
 bool llama_expert_hotstore::maybe_resync(const llama_expert_heatmap & heatmap, bool multi_slot) {
     // n_tokens>1 (multi-slot) freezes the hot store: no swapping during the batch
     if (multi_slot || heatmap.tokens_total <= 0) {
         return false;
     }
+    // fast-start converge phase: short resync floor, dwell gates off
+    const bool boot = in_boot(heatmap);
     int eff_period;
     if (swaps_per_turn > 0) {
         // low-bandwidth mode: a fixed turn, a model-wide swap budget per turn
@@ -1105,7 +1119,7 @@ bool llama_expert_hotstore::maybe_resync(const llama_expert_heatmap & heatmap, b
         // wall-clock cadence: the period must absorb the resync cost several
         // times over, else the store churns faster than it helps (RFC #24528:
         // tune on wall-clock, not hit rate, which plateaus flat).
-        const int floor = copy_mode ? 5 : 10;
+        const int floor = boot ? boot_period : (copy_mode ? 5 : 10);
         int period = 32;
         if (have_tokens && have_sync && ema_tok_us > 0.0) {
             const double cost = ema_sync_us / ema_tok_us;
@@ -1120,7 +1134,14 @@ bool llama_expert_hotstore::maybe_resync(const llama_expert_heatmap & heatmap, b
             resync_cold(heatmap);
             return resync_full_mirror(heatmap, std::max(1, hot_s));
         }
-        resync_cold(heatmap);
+        // boot phase: the cold ranking is still unreliable, so moving cold
+        // experts now would churn for nothing; let the hot store converge first
+        if (!boot && cold_sync_step > 0) {
+            if (++cold_sync_count >= cold_sync_step) {
+                cold_sync_count = 0;
+                resync_cold(heatmap);
+            }
+        }
         return resync_top_s(heatmap, swaps_per_turn > 0 ? swaps_per_turn : -1);
     }
     return false;
@@ -1130,8 +1151,15 @@ bool llama_expert_hotstore::resync_cold(const llama_expert_heatmap & heatmap) {
     if (!cold_filled || cold_s <= 0 || entries.empty() || !buf_cold) {
         return false;
     }
+    // cold-store conservation: a cold resident must keep at least
+    // cold_dwell_min cold syncs before eviction (a floor that applies even
+    // when the user dwell is 0, so the cold store does not churn); the
+    // model-wide cold placement changes per sync are capped by the budget.
+    const int eff_dwell = std::max(dwell, cold_dwell_min);
     int changed = 0;
-    for (int il = 0; il < n_layers; il++) {
+    int moved = 0;
+    bool done = cold_sync_budget <= 0;
+    for (int il = 0; il < n_layers && !done; il++) {
         auto & sc = slot_to_cold[il];
         auto & cr = cold_routed[il];
         auto & dc = cold_dwell[il];
@@ -1145,12 +1173,12 @@ bool llama_expert_hotstore::resync_cold(const llama_expert_heatmap & heatmap) {
         // host copy was released: a no-mmap tensor must copy the slice back
         // (verified) before the CPU takes over; an mmap tensor re-faults its
         // released pages from the file, so no copy-back is needed
-        for (int p = 0; p < cold_s; p++) {
+        for (int p = 0; p < cold_s && !done; p++) {
             const int e = sc[p];
             if (e < 0) {
                 continue;
             }
-            if (!in_bottom[e] && dc[p] >= dwell) {
+            if (!in_bottom[e] && dc[p] >= eff_dwell) {
                 if (!copy_mode) {
                     bool ok = true;
                     for (entry * ent : entries_by_layer[il]) {
@@ -1181,6 +1209,10 @@ bool llama_expert_hotstore::resync_cold(const llama_expert_heatmap & heatmap) {
                 sc[p] = -1;
                 dc[p] = 0;
                 changed++;
+                moved++;
+                if (cold_sync_budget > 0 && moved >= cold_sync_budget) {
+                    done = true;
+                }
             } else {
                 dc[p]++;
             }
@@ -1188,7 +1220,7 @@ bool llama_expert_hotstore::resync_cold(const llama_expert_heatmap & heatmap) {
 
         // promote bottom-C experts that are not resident on either GPU tier;
         // copy into a free cold slot and hash-verify before routing
-        for (int p = 0; p < cold_s; p++) {
+        for (int p = 0; p < cold_s && !done; p++) {
             if (sc[p] >= 0) {
                 continue; // slot still occupied
             }
@@ -1243,6 +1275,10 @@ bool llama_expert_hotstore::resync_cold(const llama_expert_heatmap & heatmap) {
                 cr[pick] = 1;
                 dc[p] = 0;
                 changed++;
+                moved++;
+                if (cold_sync_budget > 0 && moved >= cold_sync_budget) {
+                    done = true;
+                }
             }
         }
     }

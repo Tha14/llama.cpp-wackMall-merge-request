@@ -447,6 +447,9 @@ extern "C" {
         bool  expert_hot_split_set;   // true when --expert-hot-split was given
         int   expert_cold_s;          // number of bottom-C expert slots parked on the coldstore GPU (0 = disabled)
         int   expert_cold_gpu;        // put the coldstore on this GPU index (device name like CUDA1; -1 = disabled)
+        int   expert_boot_tokens;     // fast-start converge window in decode tokens; 0 = phase off (default 512)
+        int   expert_cold_dwell_min;  // min cold syncs a coldstore slot keeps before eviction (default 2)
+        int   expert_cold_sync_step;  // run the cold re-sync every Nth hot re-sync; 0 = never (default 4)
 
         // a source/target/parent context
         // can be utilized in various ways, for example by sharing results or llama_memory between 2 contexts

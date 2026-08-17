@@ -95,6 +95,10 @@ struct llama_expert_hotstore {
                e >= 0 && e < (int) gpu_routed[il].size() && gpu_routed[il][e] != 0;
     }
 
+    // fast-start converge phase: active while the number of seen decode tokens
+    // is below the boot budget. drives the short cadence and the dwell bypass.
+    bool in_boot(const llama_expert_heatmap & heatmap) const;
+
     // re-sync cadence in tokens (constructor feed; the active pacing is the
     // wall-clock cadence below, so this is informational only)
     int sync_period = 0;
@@ -128,12 +132,25 @@ struct llama_expert_hotstore {
     // hysteresis gate: a resident slot is only swapped when a cold
     // expert scores >= hyst * the incumbent AND the slot has dwelled long enough
     float hyst  = 0.0f; // 0 = gate off (swap freely)
-    int   dwell = 0;    // minimum syncs a resident must keep; 0 = off
+int dwell = 0;    // minimum syncs a resident must keep; 0 = off
     bool  copy_mode = false; // resolved: keep the RAM copy of promoted experts
     int   mode = 0;         // user mode: 0 = auto, 1 = copy, 2 = move
     // low-bandwidth mode: fixed 32-token turn, at most swaps_per_turn expert
     // placement changes model-wide per turn (0 = unlimited, adaptive cadence)
     int swaps_per_turn = 0;
+    // fast-start converge window (in decode tokens): while inside it, the hot
+    // store resyncs at a short cadence with the dwell gates off so it tracks
+    // the true hot set quickly; 0 = phase off (current behavior)
+    int boot_tokens = 512;
+    int boot_period = 2; // fast-phase cadence floor
+    // cold-store conservation: resync_cold runs every cold_sync_step hot
+    // resyncs (0 = never after the startup batch); a cold resident keeps at
+    // least cold_dwell_min cold syncs before eviction (applies even when the
+    // user dwell is 0); cold_sync_budget caps model-wide cold changes per sync
+    int cold_sync_step   = 4;
+    int cold_dwell_min   = 2;
+    int cold_sync_budget = 2;
+    int cold_sync_count  = 0; // hot syncs since the last cold resync
     // max concurrent transfers in flight per layer, per direction (eviction
     // queue + promotion queue). higher = faster store adaptation, at the cost
     // of more slots temporarily in transition (not counted).
@@ -176,7 +193,9 @@ llama_expert_hotstore(const llama_model * model, int n_layers,
                       int n_experts, int hot_s, int cold_s,
                       int sync_period = 0,
                       float hyst = 0.0f, int dwell = 0, int mode = 0,
-                      int swaps_per_turn = 0);
+                      int swaps_per_turn = 0,
+                      int boot_tokens = 512, int cold_dwell_min = 2,
+                      int cold_sync_step = 4);
 
     ~llama_expert_hotstore();
 

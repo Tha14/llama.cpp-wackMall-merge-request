@@ -502,7 +502,9 @@ llama_context::llama_context(
             &model, hparams.n_layer(), hparams.n_expert,
             params.expert_hot_s, params.expert_cold_s, sync_period,
             params.expert_hyst, params.expert_dwell, params.expert_move_mode,
-            params.expert_swaps_per_turn);
+            params.expert_swaps_per_turn,
+            params.expert_boot_tokens, params.expert_cold_dwell_min,
+            params.expert_cold_sync_step);
         // enable the GPU hot store on any GPU backend (CUDA, Vulkan, ROCm,
         // SYCL, Metal, ...).
         bool cache_enabled = false;
@@ -3915,6 +3917,9 @@ llama_context_params llama_context_default_params() {
         /*.expert_hot_split_set        =*/ false,
         /*.expert_cold_s               =*/ 0,
         /*.expert_cold_gpu             =*/ -1,
+        /*.expert_boot_tokens          =*/ 512,
+        /*.expert_cold_dwell_min       =*/ 2,
+        /*.expert_cold_sync_step       =*/ 4,
         /*.ctx_other                   =*/ nullptr,
     };
 

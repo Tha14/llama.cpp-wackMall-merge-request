@@ -2902,6 +2902,30 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
             params.expert_cold_gpu = llama_expert_preload::expert_gpu_parse(value);
         }
     ).set_env("LLAMA_ARG_EXPERT_COLD_GPU"));
+    add_opt(common_arg(
+        {"--expert-boot-tokens"}, "N",
+        "fast-start converge window in decode tokens: while inside it the hot "
+        "store re-syncs fast with the dwell gates off; 0 = phase off (default: 512)",
+        [](common_params & params, int value) {
+            params.expert_boot_tokens = value;
+        }
+    ).set_env("LLAMA_ARG_EXPERT_BOOT_TOKENS"));
+    add_opt(common_arg(
+        {"--expert-cold-dwell-min"}, "N",
+        "min cold syncs a coldstore slot keeps before eviction, a floor that "
+        "applies even with --expert-dwell 0 (default: 2)",
+        [](common_params & params, int value) {
+            params.expert_cold_dwell_min = value;
+        }
+    ).set_env("LLAMA_ARG_EXPERT_COLD_DWELL_MIN"));
+    add_opt(common_arg(
+        {"--expert-cold-sync-step"}, "N",
+        "run the coldstore re-sync every Nth hot store re-sync; "
+        "0 = never after the startup batch (default: 4)",
+        [](common_params & params, int value) {
+            params.expert_cold_sync_step = value;
+        }
+    ).set_env("LLAMA_ARG_EXPERT_COLD_SYNC_STEP"));
     GGML_ASSERT(params.n_gpu_layers < 0); // string_format would need to be extended for a default >= 0
     add_opt(common_arg(
         {"-ngl", "--gpu-layers", "--n-gpu-layers"}, "N",

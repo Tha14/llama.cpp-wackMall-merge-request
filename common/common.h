@@ -540,6 +540,9 @@ struct common_params {
     bool  expert_hot_split_set   = false; // set when --expert-hot-split was given
     int   expert_cold_s          = 0;    // bottom-C expert slots parked on the coldstore GPU (0 = disabled)
     int   expert_cold_gpu        = -1;   // coldstore GPU index, resolved from --expert-cold-gpu (device name like CUDA1; -1 = disabled)
+    int   expert_boot_tokens     = 512;  // fast-start converge window in decode tokens; 0 = phase off
+    int   expert_cold_dwell_min  = 2;    // min cold syncs a coldstore slot keeps before eviction
+    int   expert_cold_sync_step  = 4;    // run the cold re-sync every Nth hot re-sync; 0 = never
     bool    offline                    = false;
 
     int32_t ppl_stride      = 0;     // stride for perplexity calculations. If left at 0, the pre-existing approach will be used.
