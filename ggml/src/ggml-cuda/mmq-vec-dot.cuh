@@ -56,7 +56,6 @@ template <ggml_type type, int J, bool fallback> static __device__ __forceinline_
         }
     }
 }
-
 template <ggml_type type, int J, bool fallback> static __device__ __forceinline__ void ggml_cuda_mmq_vec_dot_q4_1_q8_1_dp4a(
         const int * __restrict__ x, const int * __restrict__ y, float * __restrict__ sum, const int k00) {
     constexpr int warp_size = ggml_cuda_get_physical_warp_size();
@@ -1248,4 +1247,3 @@ template <ggml_type type, int J, bool fallback> static __device__ __forceinline_
         }
     }
 }
-
