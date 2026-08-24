@@ -1444,7 +1444,8 @@ llama_kv_cache::llama_kv_cache(
             hparams.n_embd_head_k() % 64 == 0;
 
         // always create Hadamard rotation tensors for DeepSeek lightning indexers
-        if ((model.arch == LLM_ARCH_DEEPSEEK32 || model.arch == LLM_ARCH_DEEPSEEK4 || model.arch == LLM_ARCH_GLM_DSA) &&
+        if ((model.arch == LLM_ARCH_DEEPSEEK32 || model.arch == LLM_ARCH_DEEPSEEK4 ||
+                model.arch == LLM_ARCH_GLM_DSA || model.arch == LLM_ARCH_DOTS3NOTE) &&
                 hparams.n_embd_head_k_full == hparams.indexer_head_size) {
             attn_rot_k = true;
         }
@@ -1593,6 +1594,7 @@ bool llama_kv_cache::seq_rm_unchecked(llama_seq_id seq_id, llama_pos p0, llama_p
     }
     materialize_pending_copies();
 
+    // TODO: fix incosistent handling of `seq_id < 0` and `seq_id == -1` in the codebase [TAG_LLAMA_SEQ_ID_NEG]
     GGML_ASSERT(seq_id == -1 || (seq_id >= 0 && (size_t) seq_id < seq_to_stream.size()));
 
     if (tail) {
