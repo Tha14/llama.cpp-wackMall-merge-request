@@ -7,7 +7,6 @@ on:
       - master
     paths: [
       '.github/workflows/build-cpu.yml',
-      '.github/workflows/build-cmake-pkg.yml',
       '**/CMakeLists.txt',
       '**/.cmake',
       '**/*.h',
@@ -20,8 +19,6 @@ on:
     types: [opened, synchronize, reopened]
     paths: [
       '.github/workflows/build-cpu.yml',
-      '.github/workflows/build-cmake-pkg.yml',
-      'ggml/src/ggml-rpc/**',
       '**/CMakeLists.txt',
       '**/.cmake',
       '**/*.h',
@@ -42,9 +39,6 @@ env:
   LLAMA_ARG_LOG_TIMESTAMPS: 1
 
 jobs:
-  build-cmake-pkg:
-    uses: ./.github/workflows/build-cmake-pkg.yml
-
   ubuntu:
     strategy:
       matrix:
@@ -99,6 +93,11 @@ jobs:
             -DGGML_RPC=ON
           time cmake --build build --config Release -j $(nproc)
 
+      - name: ccache-clear
+        uses: ./.github/actions/ccache-clear
+        with:
+          key: cpu-${{ matrix.os }}
+
       - name: Test
         id: cmake_test
         run: |
@@ -116,25 +115,11 @@ jobs:
           ./bin/llama-convert-llama2c-to-ggml --copy-vocab-from-model ./tok512.bin --llama2c-model stories260K.bin --llama2c-output-model stories260K.gguf
           ./bin/llama-completion -m stories260K.gguf -p "One day, Lily met a Shoggoth" -n 500 -c 256
 
-      # note: real deletion only on push to master (same condition as the ccache save),
-      #       dry-run otherwise (the token is read-only on PRs from forks)
-      - name: ccache-clear
-        uses: ./.github/actions/ccache-clear
-        env:
-          GH_TOKEN: ${{ github.token }}
-        with:
-          key: cpu-${{ matrix.os }}
-          older: 5m
-          min: 1
-          dry-run: ${{ github.event_name != 'push' || github.ref != 'refs/heads/master' }}
-
   windows:
-    name: windows / ${{ matrix.build }}
     runs-on: windows-2025
 
     env:
       OPENBLAS_VERSION: 0.3.23
-      SDE_VERSION: 9.33.0-2024-01-07
 
     strategy:
       matrix:
@@ -144,10 +129,7 @@ jobs:
             defines: '-G "Ninja Multi-Config" -D CMAKE_TOOLCHAIN_FILE=cmake/x64-windows-llvm.cmake -DGGML_NATIVE=OFF -DGGML_OPENMP_FETCH=ON -DLLAMA_BUILD_SERVER=ON -DGGML_RPC=ON -DBUILD_SHARED_LIBS=OFF'
           - build: 'x64-openblas'
             arch: 'x64'
-            defines: '-G "Ninja Multi-Config" -D CMAKE_TOOLCHAIN_FILE=cmake/x64-windows-llvm.cmake -DGGML_NATIVE=OFF -DLLAMA_BUILD_SERVER=ON -DGGML_RPC=ON -DGGML_BACKEND_DL=ON -DGGML_CPU_ALL_VARIANTS=ON -DGGML_OPENMP=OFF -DGGML_BLAS=ON -DGGML_BLAS_VENDOR=OpenBLAS -DBLAS_INCLUDE_DIRS="$env:RUNNER_TEMP/openblas/include" -DBLAS_LIBRARIES="$env:RUNNER_TEMP/openblas/lib/openblas.lib"'
-          - build: 'arm64'
-            arch: 'arm64'
-            defines: '-G "Ninja Multi-Config" -D CMAKE_TOOLCHAIN_FILE=cmake/arm64-windows-llvm.cmake -DGGML_NATIVE=OFF -DGGML_OPENMP_FETCH=ON -DLLAMA_BUILD_SERVER=ON'
+            defines: '-G "Ninja Multi-Config" -D CMAKE_TOOLCHAIN_FILE=cmake/x64-windows-llvm.cmake -DGGML_NATIVE=OFF -DGGML_OPENMP_FETCH=ON -DLLAMA_BUILD_SERVER=ON -DGGML_RPC=ON -DGGML_BACKEND_DL=ON -DGGML_CPU_ALL_VARIANTS=ON -DGGML_OPENMP=OFF -DGGML_BLAS=ON -DGGML_BLAS_VENDOR=OpenBLAS -DBLAS_INCLUDE_DIRS="$env:RUNNER_TEMP/openblas/include" -DBLAS_LIBRARIES="$env:RUNNER_TEMP/openblas/lib/openblas.lib"'
 
     steps:
       - name: Clone
@@ -179,6 +161,11 @@ jobs:
         id: install_ninja
         run: |
           choco install ninja
+
+      - name: ccache-clear
+        uses: ./.github/actions/ccache-clear
+        with:
+          key: cpu-windows-2025-${{ matrix.build }}
 
       - name: Build
         id: cmake_build
@@ -214,13 +201,3 @@ jobs:
       #     cd build
       #     $env:LLAMA_SKIP_TESTS_SLOW_ON_EMULATOR = 1
       #     & $sde -future -- ctest -L main -C Release --verbose --timeout 900
-
-      - name: ccache-clear
-        uses: ./.github/actions/ccache-clear
-        env:
-          GH_TOKEN: ${{ github.token }}
-        with:
-          key: cpu-windows-2025-${{ matrix.build }}
-          older: 5m
-          min: 1
-          dry-run: ${{ github.event_name != 'push' || github.ref != 'refs/heads/master' }}
