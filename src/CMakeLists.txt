@@ -16,13 +16,23 @@ add_library(llama
             llama-batch.cpp
             llama-chat.cpp
             llama-context.cpp
-            llama-cparams.cpp
-            llama-grammar.cpp
+             llama-cparams.cpp
+             llama-expert-heatmap.cpp
+             llama-expert-hotstore.cpp
+             llama-expert-pin.cpp
+             llama-expert-preload.cpp
+             llama-expert-tier.cpp
+             llama-grammar.cpp
             llama-graph.cpp
             llama-hparams.cpp
             llama-impl.cpp
             llama-io.cpp
+            llama-kvarn.cpp
             llama-kv-cache.cpp
+            llama-kv-cache-tail.cpp
+            llama-kv-tail-request.cpp
+            llama-kv-cache-placement.cpp
+            llama-kv-cache-kvarn.cpp
             llama-kv-cache-iswa.cpp
             llama-kv-cache-dsa.cpp
             llama-kv-cache-dsa-iswa.cpp
