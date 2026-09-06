@@ -60,7 +60,7 @@ llama_memory_hybrid_idx::llama_memory_hybrid_idx(
         return new llama_kv_cache(
             model, hparams_idx, type_k, type_v, v_trans, offload, unified,
             kv_size, n_seq_max, n_pad, n_swa, swa_type,
-            nullptr, filter_idx, nullptr, nullptr, "idx_");
+            nullptr, filter_idx, nullptr, nullptr);
     }()) {}
 
 llama_memory_context_ptr llama_memory_hybrid_idx::init_batch(llama_batch_allocr & balloc, uint32_t n_ubatch, bool embd_all) {
@@ -109,7 +109,7 @@ llama_memory_context_ptr llama_memory_hybrid_idx::init_batch(llama_batch_allocr 
         }
 
         // prepare the attention cache
-        auto heads_attn = get_mem_attn()->prepare(ubatches);
+        auto heads_attn = static_cast<llama_kv_cache*>(get_mem_attn())->prepare(ubatches);
         if (heads_attn.empty()) {
             LLAMA_LOG_ERROR("%s: failed to prepare attention ubatches\n", __func__);
             return std::make_unique<llama_memory_hybrid_idx_context>(LLAMA_MEMORY_STATUS_FAILED_PREPARE);
@@ -225,7 +225,7 @@ void llama_memory_hybrid_idx::state_read(llama_io_read_i & io, llama_seq_id seq_
 
     try {
         if ((flags & LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY) == 0) {
-            get_mem_attn()->state_read_sinfo(io, seq_id, flags, mem_idx ? &sinfos_attn : nullptr, nullptr);
+            static_cast<llama_kv_cache*>(get_mem_attn())->state_read_sinfo(io, seq_id, flags, mem_idx ? &sinfos_attn : nullptr, nullptr);
         }
 
         get_mem_recr()->state_read(io, seq_id, flags);
@@ -628,8 +628,9 @@ llama_memory_hybrid_idx_context::llama_memory_hybrid_idx_context(
                 slot_info_vec_t   sinfos_attn,
                 slot_info_vec_t   sinfos_idx,
       std::vector<llama_ubatch>   ubatches) :
-    // note: the base copies the ubatches; ctx_idx gets a copy of its own
-    llama_memory_hybrid_context(mem, std::move(sinfos_attn), ubatches),
+    llama_memory_hybrid_context(mem, std::unique_ptr<llama_memory_context_i>(
+        new llama_kv_cache_context(static_cast<llama_kv_cache*>(mem->get_mem_attn()), std::move(sinfos_attn), ubatches)),
+        ubatches),
     mem(mem),
     ns_ubatch(llama_memory_hybrid_idx_ns(sinfos_idx)),
     ctx_idx(mem->get_mem_idx() == nullptr ? nullptr :

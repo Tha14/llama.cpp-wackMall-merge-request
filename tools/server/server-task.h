@@ -567,8 +567,48 @@ struct server_task_result_metrics : server_task_result {
     // these are immediate stats, not accumulated (server_metrics is cumulative)
     int n_processing_slots = 0;
     int n_tasks_deferred = 0;
+    int64_t t_start = 0;
 
     server_metrics metrics;
+
+    uint64_t n_prompt_tokens_processed_total = 0;
+    uint64_t t_prompt_processing_total = 0;
+    uint64_t n_tokens_predicted_total  = 0;
+    uint64_t t_tokens_generation_total = 0;
+
+    uint64_t n_tokens_max = 0;
+
+    uint64_t n_prompt_tokens_processed = 0;
+    uint64_t t_prompt_processing = 0;
+    uint64_t n_tokens_predicted = 0;
+    uint64_t t_tokens_generation = 0;
+
+    uint64_t n_decode_total     = 0;
+    uint64_t n_busy_slots_total = 0;
+
+    uint64_t n_draft_tokens_total      = 0;
+    uint64_t n_draft_accepted_total    = 0;
+    uint64_t n_draft_verif_steps_total = 0;
+    std::vector<uint64_t> n_accepted_per_pos_total;
+
+    uint64_t kv_tail_requested          = 0;
+    uint64_t kv_tail_exact              = 0;
+    uint64_t kv_tail_complete_groups    = 0;
+    uint64_t kv_tail_partial_groups     = 0;
+    uint64_t kv_tail_none_groups        = 0;
+    uint64_t kv_tail_degraded_sequences = 0;
+
+    uint64_t prompt_cache_admission_attempts = 0;
+    uint64_t prompt_cache_admission_successes = 0;
+    uint64_t prompt_cache_admission_failures = 0;
+    uint64_t prompt_cache_restore_attempts = 0;
+    uint64_t prompt_cache_restore_successes = 0;
+    uint64_t prompt_cache_restore_failures = 0;
+    uint64_t prompt_cache_accounted_bytes = 0;
+
+    // while we can also use std::vector<server_slot> this requires copying the slot object which can be quite messy
+    // therefore, we use json to temporarily store the slot.to_json() result
+    json slots_data = json::array();
 
     virtual json to_json() override;
 
@@ -580,32 +620,9 @@ struct server_task_result_metrics : server_task_result {
     std::string to_metrics();
 };
 
-    uint64_t n_tokens_predicted  = 0;
-    uint64_t t_tokens_generation = 0;
-
-    uint64_t n_decode_total     = 0;
-    uint64_t n_busy_slots_total = 0;
-
-    uint64_t kv_tail_requested          = 0;
-    uint64_t kv_tail_exact              = 0;
-    uint64_t kv_tail_complete_groups    = 0;
-    uint64_t kv_tail_partial_groups     = 0;
-    uint64_t kv_tail_none_groups        = 0;
-    uint64_t kv_tail_degraded_sequences = 0;
-    uint64_t prompt_cache_admission_attempts = 0;
-    uint64_t prompt_cache_admission_successes = 0;
-    uint64_t prompt_cache_admission_failures = 0;
-    uint64_t prompt_cache_restore_attempts = 0;
-    uint64_t prompt_cache_restore_successes = 0;
-    uint64_t prompt_cache_restore_failures = 0;
-    uint64_t prompt_cache_accounted_bytes = 0;
-    uint64_t n_draft_tokens_total      = 0;
-    uint64_t n_draft_accepted_total    = 0;
-    uint64_t n_draft_verif_steps_total = 0;
-    std::vector<uint64_t> n_accepted_per_pos_total;
-
-    // while we can also use std::vector<server_slot> this requires copying the slot object which can be quite messy
-    // therefore, we use json to temporarily store the slot.to_json() result
+// used by /slots API
+struct server_task_result_slots : server_task_result {
+    int n_idle_slots = 0;
     json slots_data = json::array();
 
     virtual json to_json() override;

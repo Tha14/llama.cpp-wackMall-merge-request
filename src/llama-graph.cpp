@@ -3659,7 +3659,7 @@ ggml_tensor * llm_graph_context::build_attn(
                 k, v, body_mask, body_bias);
     }
     ggml_tensor * final_tail_op = nullptr;
-    ggml_tensor * cur = build_attn_mha(q, k, v, body_bias, body_mask, sinks, v_mla, kq_scale, il,
+    ggml_tensor * cur = build_attn_mha(q, k, v, body_bias, body_mask, sinks, v_mla, 0, kq_scale, il,
             k_tail, v_tail, inp->get_kq_mask_tail(), kq_b_tail,
             use_indexed_tail ? tail_read_idxs : nullptr,
             (use_indexed_tail || use_kvarn) ? inp->get_tail_query_order() : nullptr,
@@ -4095,7 +4095,7 @@ ggml_tensor * llm_graph_context::build_attn(
                 k, v, body_mask, body_bias);
     }
     ggml_tensor * final_tail_op = nullptr;
-    ggml_tensor * cur = build_attn_mha(q, k, v, body_bias, body_mask, sinks, v_mla, kq_scale, il,
+    ggml_tensor * cur = build_attn_mha(q, k, v, body_bias, body_mask, sinks, v_mla, 0, kq_scale, il,
             k_tail, v_tail, inp->get_kq_mask_tail(is_swa), kq_b_tail,
             use_indexed_tail ? tail_read_idxs : nullptr,
             (use_indexed_tail || use_kvarn) ? inp->get_tail_query_order(is_swa) : nullptr,

@@ -54,6 +54,10 @@ function(ggml_add_cpu_backend_variant_impl tag_name)
         ggml-cpu/vec.cpp
         ggml-cpu/ops.h
         ggml-cpu/ops.cpp
+        ggml-cpu/ggml-cpu-moe-cold.c
+        ggml-cpu/ggml-cpu-moe-cold.h
+        ggml-cpu/ggml-cpu-mul-mat-id-cold.c
+        ggml-cpu/ggml-cpu-mul-mat-id-cold.h
         )
 
     target_compile_features(${GGML_CPU_NAME} PRIVATE c_std_11 cxx_std_17)

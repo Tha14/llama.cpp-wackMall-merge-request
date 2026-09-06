@@ -621,6 +621,9 @@ extern "C" {
 
         GGML_OP_GLU,
 
+        GGML_OP_MUL_MAT_ID_COLD,
+        GGML_OP_MOE_COLD,
+
         GGML_OP_COUNT,
     };
 
@@ -1485,6 +1488,42 @@ extern "C" {
             struct ggml_tensor  * as,
             struct ggml_tensor  * b,
             struct ggml_tensor  * ids);
+    // indirect matrix multiplication for cold experts only: computes only rows
+    // whose expert is marked 1 in cold_mask (i32 [n_expert], 1 = cold); hot
+    // slots are zeroed in the result
+    // ids (i32 [n_expert, n_tokens]) maps each token to an expert; cold_mask
+    // (i32 [n_expert]) marks which experts are cold (1 = cold, 0 = hot)
+    // counts (optional, i32 [n_expert + 1]) accumulates per-expert routed hits
+    // ptrs (optional, i64 [n_expert]) is reserved for the RAM pool
+    GGML_API struct ggml_tensor * ggml_mul_mat_id_cold(
+            struct ggml_context * ctx,
+            struct ggml_tensor  * as,
+            struct ggml_tensor  * b,
+            struct ggml_tensor  * ids,
+            struct ggml_tensor  * cold_mask,
+            struct ggml_tensor  * counts,
+            struct ggml_tensor  * ptrs);
+
+    // fused cold-expert MoE for one layer: down(act(gate(x)) * up(x)) computed
+    // on the CPU for cold experts only (cold_mask[i] == 1); hot slots zeroed.
+    // act is 0 = silu (separate gate/up), 1 = gelu (fused gate_up tensor).
+    // counts (optional, i32 [n_expert + 1]) accumulates per-expert routed hits.
+    // x must be [n_embd, 1, n_tokens]; result is [down->ne[1], ids->ne[0], n_tokens]
+    GGML_API struct ggml_tensor * ggml_moe_cold(
+            struct ggml_context * ctx,
+            struct ggml_tensor  * gate,
+            struct ggml_tensor  * up,
+            struct ggml_tensor  * down,
+            struct ggml_tensor  * x,
+            struct ggml_tensor  * ids,
+            struct ggml_tensor  * cold_mask,
+            struct ggml_tensor  * counts,
+            int32_t               act);
+
+    typedef const uint8_t * (*ggml_mmid_cold_slice_fn)(const struct ggml_tensor * src0, int expert);
+    GGML_API void ggml_mmid_cold_set_slice_fn(ggml_mmid_cold_slice_fn fn);
+    GGML_API const uint8_t * ggml_mmid_cold_get_slice(const struct ggml_tensor * src0, int expert);
+
 
     // A: m columns, n rows,
     // B: p columns, n rows,

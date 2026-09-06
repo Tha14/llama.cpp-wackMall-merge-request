@@ -397,6 +397,10 @@ struct common_speculative_impl_draft_simple : public common_speculative_impl {
     void accept(llama_seq_id /*seq_id*/, uint16_t /*n_accepted*/, bool /*is_other*/) override {
         // noop
     }
+
+    bool need_embd() const override {
+        return false;
+    }
 };
 
 
@@ -937,6 +941,10 @@ struct common_speculative_impl_draft_eagle3 : public common_speculative_impl {
         std::memcpy(pending_g_last[seq_id].data(), data.data() + sizeof(llama_pos), (size_t) n_embd_dec * sizeof(float));
         return true;
     }
+
+    bool need_embd() const override {
+        return false;
+    }
 };
 
 // DFlash: block-diffusion drafting with a draft-side KV cache injection
@@ -1351,6 +1359,10 @@ struct common_speculative_impl_draft_dflash : public common_speculative_impl {
 
     void accept(llama_seq_id /*seq_id*/, uint16_t /*n_accepted*/, bool /*is_other*/) override {
         // noop
+    }
+
+    bool need_embd() const override {
+        return false;
     }
 };
 
@@ -1912,6 +1924,10 @@ struct common_speculative_impl_ngram_simple : public common_speculative_impl {
     void accept(llama_seq_id /*seq_id*/, uint16_t /*n_accepted*/, bool /*is_other*/) override {
         // noop
     }
+
+    bool need_embd() const override {
+        return false;
+    }
 };
 
 struct common_speculative_impl_ngram_map_k : public common_speculative_impl {
@@ -1965,6 +1981,10 @@ struct common_speculative_impl_ngram_map_k : public common_speculative_impl {
         }
 
         common_ngram_map_accept(config[seq_id], n_accepted);
+    }
+
+    bool need_embd() const override {
+        return false;
     }
 };
 
@@ -2141,6 +2161,10 @@ struct common_speculative_impl_ngram_mod : public common_speculative_impl {
             }
         }
     }
+
+    bool need_embd() const override {
+        return false;
+    }
 };
 
 struct common_speculative_impl_ngram_cache : public common_speculative_impl {
@@ -2279,6 +2303,10 @@ struct common_speculative_impl_ngram_cache : public common_speculative_impl {
 
     void accept(llama_seq_id /*seq_id*/, uint16_t /*n_accepted*/, bool /*is_other*/) override {
         // noop
+    }
+
+    bool need_embd() const override {
+        return false;
     }
 };
 

@@ -947,7 +947,7 @@ enum common_params_fit_status common_fit_params(
         // attached. Only KVarN/precision-tail callers pay for exact validation.
         if (cparams->kv_tail_request == nullptr) {
             common_params_fit_impl(path_model, mparams, cparams, tensor_split,
-                    tensor_buft_overrides, margins, n_ctx_min, log_level);
+                    tensor_buft_overrides, margins, n_ctx_min, extra, log_level);
         } else {
             const llama_model_params pristine_mparams = *mparams;
             const llama_context_params pristine_cparams = *cparams;
@@ -988,7 +988,7 @@ enum common_params_fit_status common_fit_params(
                         tensor_buft_overrides, pristine_mparams, pristine_cparams,
                         pristine_tensor_split, pristine_overrides);
                 common_params_fit_impl(path_model, mparams, cparams, tensor_split,
-                        tensor_buft_overrides, adjusted_margins.data(), n_ctx_min, log_level);
+                        tensor_buft_overrides, adjusted_margins.data(), n_ctx_min, extra, log_level);
 
                 std::vector<ggml_backend_dev_t> devs;
                 uint32_t hp_ngl = 0;

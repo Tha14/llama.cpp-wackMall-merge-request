@@ -5197,6 +5197,45 @@ void llama_kv_cache::state_read(llama_io_read_i & io, llama_seq_id seq_id, llama
     });
 }
 
+void llama_kv_cache::state_read_sinfo(
+        llama_io_read_i & io,
+           llama_seq_id   seq_id,
+      llama_state_seq_flags flags,
+          slot_info_vec_t *   sinfos_out,
+    const slot_info_vec_t *   sinfos_in) {
+    const uint32_t n_stream = get_n_stream();
+    if (sinfos_out) {
+        sinfos_out->resize(n_stream);
+    }
+    for (uint32_t i = 0; i < n_stream; i++) {
+        slot_info sinfo;
+        state_read_meta(io, i, 0, sinfo, seq_id, sinfos_in ? &(*sinfos_in)[i] : nullptr);
+        if (sinfos_out) {
+            (*sinfos_out)[i] = std::move(sinfo);
+        }
+    }
+}
+
+bool llama_kv_cache::has_cell_ext() const {
+    return hparams.n_pos_per_embd() > 1 || hparams.ple_n_heads > 0;
+}
+
+void llama_kv_cache::get_prev_tokens(
+        const llama_ubatch & ubatch, uint32_t n, std::vector<llama_token> & res) const {
+    res.resize(ubatch.n_tokens * n);
+    for (uint32_t i = 0; i < ubatch.n_tokens; i++) {
+        llama_token * prev = &res[i * n];
+        for (uint32_t j = 0; j < n; j++) {
+            prev[j] = ubatch.token[i] - j;
+        }
+    }
+}
+
+void llama_kv_cache_context::get_prev_tokens(
+        const llama_ubatch & ubatch, uint32_t n, std::vector<llama_token> & res) const {
+    kv->get_prev_tokens(ubatch, n, res);
+}
+
 void llama_kv_cache::state_read_impl(llama_io_read_i & io, llama_seq_id seq_id, llama_state_seq_flags flags) {
     // TODO: refactor [TAG_KV_CACHE_SHARE_CELLS]
     if (other) {
@@ -5211,7 +5250,7 @@ void llama_kv_cache::state_read_impl(llama_io_read_i & io, llama_seq_id seq_id, 
             throw std::runtime_error(
                     "legacy KV state lacks compact-tail representation metadata");
         }
-        state_read_body(io, seq_id, marker);
+        state_read_body(io, seq_id, marker, nullptr);
         if (has_tail_overlay()) {
             if (seq_id == -1) {
                 tail->clear();
@@ -5308,7 +5347,7 @@ void llama_kv_cache::state_read_impl(llama_io_read_i & io, llama_seq_id seq_id, 
     uint32_t body_n_stream;
     const size_t body_begin = io.n_bytes();
     io.read(&body_n_stream, sizeof(body_n_stream));
-    const auto restored_cells = state_read_body(io, seq_id, body_n_stream);
+    const auto restored_cells = state_read_body(io, seq_id, body_n_stream, nullptr);
     if (io.n_bytes() - body_begin != body_size) {
         throw std::runtime_error("invalid KV tail state body section size");
     }
@@ -5396,7 +5435,8 @@ void llama_kv_cache::state_write_body(llama_io_write_i & io, llama_seq_id seq_id
 }
 
 std::vector<std::vector<uint32_t>> llama_kv_cache::state_read_body(
-        llama_io_read_i & io, llama_seq_id seq_id, uint32_t n_stream_cur) {
+        llama_io_read_i & io, llama_seq_id seq_id, uint32_t n_stream_cur,
+        const slot_info_vec_t * sinfos_in) {
     GGML_ASSERT(seq_id == -1 || (seq_id >= 0 && (size_t) seq_id < seq_to_stream.size()));
 
     if (n_stream_cur != n_stream) {

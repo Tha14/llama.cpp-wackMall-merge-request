@@ -233,6 +233,8 @@ public:
     // lazy-load startup_models, to be called after main() setup phase
     void load_startup_models();
 
+    std::optional<std::vector<std::string>> startup_models;
+
     // check if a model instance exists (thread-safe)
     bool has_model(const std::string & name);
 

@@ -372,6 +372,7 @@ struct ggml_backend_meta_split_state llama_meta_device_get_split_state(const str
     const llama_meta_device_get_split_state_userdata * ud = (const llama_meta_device_get_split_state_userdata *) userdata;
     const llama_hparams & hparams = ud->model->hparams;
     const std::string tensor_name = tensor->name;
+    const bool is_dsv4 = (hparams.dsv4_hc_mult > 0 || hparams.dsv4_o_group_count > 0);
     const llama_kv_cache_component cache_component =
             llama_kv_cache_component_from_name(tensor_name);
 

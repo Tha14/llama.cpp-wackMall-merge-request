@@ -221,6 +221,8 @@ struct llama_memory_i {
     virtual uint32_t get_kv_n_stream() const { return 0; }
     virtual uint32_t get_kv_size() const { return 0; }
     virtual llama_memory_context_ptr init_kv_batch(const std::vector<llama_ubatch> & /* ubatches */) { return nullptr; }
+
+    virtual uint32_t get_n_stream() const { return 0; }
 };
 
 inline bool llama_memory_seq_rm_plan_all(

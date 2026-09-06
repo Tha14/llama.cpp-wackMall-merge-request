@@ -1581,40 +1581,49 @@ json server_task_result_metrics::to_json() {
     return json{};
 }
 
-        { "n_prompt_tokens_processed_total", n_prompt_tokens_processed_total },
-        { "t_tokens_generation_total",       t_tokens_generation_total },
-        { "n_tokens_predicted_total",        n_tokens_predicted_total },
-        { "t_prompt_processing_total",       t_prompt_processing_total },
-
-        { "n_tokens_max",                    n_tokens_max },
-
-        { "n_prompt_tokens_processed",       n_prompt_tokens_processed },
-        { "t_prompt_processing",             t_prompt_processing },
-        { "n_tokens_predicted",              n_tokens_predicted },
-        { "t_tokens_generation",             t_tokens_generation },
-
-        { "n_decode_total",                  n_decode_total },
-        { "n_busy_slots_total",              n_busy_slots_total },
-
-        { "kv_tail_requested",               kv_tail_requested },
-        { "kv_tail_exact",                   kv_tail_exact },
-        { "kv_tail_complete_groups",         kv_tail_complete_groups },
-        { "kv_tail_partial_groups",          kv_tail_partial_groups },
-        { "kv_tail_none_groups",             kv_tail_none_groups },
-        { "kv_tail_degraded_sequences",      kv_tail_degraded_sequences },
-        { "prompt_cache_admission_attempts",  prompt_cache_admission_attempts },
-        { "prompt_cache_admission_successes", prompt_cache_admission_successes },
-        { "prompt_cache_admission_failures",  prompt_cache_admission_failures },
-        { "prompt_cache_restore_attempts",    prompt_cache_restore_attempts },
-        { "prompt_cache_restore_successes",   prompt_cache_restore_successes },
-        { "prompt_cache_restore_failures",    prompt_cache_restore_failures },
-        { "prompt_cache_accounted_bytes",     prompt_cache_accounted_bytes },
-        { "n_draft_tokens_total",            n_draft_tokens_total },
-        { "n_draft_accepted_total",          n_draft_accepted_total },
-        { "n_draft_verif_steps_total",       n_draft_verif_steps_total },
-        { "n_accepted_per_pos_total",        n_accepted_per_pos_total },
-
-        { "slots",                           slots_data },
+std::string server_task_result_metrics::to_metrics() {
+    const std::vector<metric_item> counters = {
+        {
+            "prompt_tokens_total",
+            "Number of prompt tokens processed, excluding cached tokens",
+            (double) metrics.prompt.count
+        }, {
+            "prompt_tokens_cached_total",
+            "Number of prompt tokens reused from the cache",
+            (double) metrics.n_prompt_cached
+        }, {
+            "prompt_seconds_total",
+            "Total time spent processing prompts",
+            metrics.prompt.time / 1.e6
+        }, {
+            "tokens_predicted_total",
+            "Number of generation tokens processed",
+            (double) metrics.predict.count
+        }, {
+            "tokens_predicted_seconds_total",
+            "Total time spent generating tokens",
+            metrics.predict.time / 1.e6
+        }, {
+            "n_decode_total",
+            "Total number of llama_decode() calls, excluding speculative decoding and multimodal decoding",
+            (double) metrics.n_decode
+        }, {
+            "n_tokens_max",
+            "Largest observed sequence length (prompt + generation)",
+            (double) metrics.n_tokens_max
+        }, {
+            "spec_decode_num_draft_tokens_total",
+            "Speculative: Total draft tokens generated",
+            (double) metrics.n_draft_tokens
+        }, {
+            "spec_decode_num_accepted_tokens_total",
+            "Speculative: Total draft tokens accepted by the target model",
+            (double) metrics.n_draft_accepted
+        }, {
+            "spec_decode_num_drafts_total",
+            "Speculative: Total speculative decoding verification steps",
+            (double) metrics.n_draft_verif_steps
+        },
     };
 
     const std::vector<metric_item> gauges = {

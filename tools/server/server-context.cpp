@@ -70,7 +70,7 @@ static uint32_t server_n_outputs_max(const common_params & params) {
 
     if (params.embedding ||
             (params.pooling_type != LLAMA_POOLING_TYPE_UNSPECIFIED && params.pooling_type != LLAMA_POOLING_TYPE_NONE)) {
-        return { params.n_batch, 1 };
+        return n_batch;
     }
 
     auto result = common_speculative_get_output_limits(
@@ -78,7 +78,7 @@ static uint32_t server_n_outputs_max(const common_params & params) {
 
     result.total   = std::max<int32_t>(1, result.total);
     result.per_seq = std::max<int32_t>(1, result.per_seq);
-    return result;
+    return (uint32_t) std::max(result.total, result.per_seq);
 }
 
 // synthetic draft verification for benchmarking - accept draft tokens at random instead of by match with the target
@@ -298,12 +298,15 @@ struct server_slot {
     // generation props
     int32_t n_ctx   = 0;  // context size per slot
     int32_t n_keep  = 0;
+    int32_t n_predict_max = -1;
     int32_t i_batch = -1;
 
     int32_t n_prompt_tokens_cache     = 0;
     int32_t n_prompt_tokens_processed = 0;
     int32_t n_prompt_tokens_lcp       = 0;
     int32_t n_prompt_tokens_planned   = 0;
+    int64_t t_start_process_prompt    = 0;
+    int64_t t_prompt_processing       = 0;
     std::string prompt_cache_source   = "none";
     std::string prompt_cache_reason   = "none";
 
@@ -684,16 +687,18 @@ struct server_slot {
         timings.cache_reason = prompt_cache_reason;
 
         timings.prompt_n            = n_prompt_tokens_processed;
-        timings.prompt_ms           = t_prompt_processing;
-        timings.prompt_per_token_ms = t_prompt_processing / n_prompt_tokens_processed;
-        timings.prompt_per_second   = 1e3 / t_prompt_processing * n_prompt_tokens_processed;
+        timings.prompt_ms           = stats.t_prompt_ms();
+        timings.prompt_per_token_ms = stats.t_prompt_ms() / n_prompt_tokens_processed;
+        timings.prompt_per_second   = 1e3 / stats.t_prompt_ms() * n_prompt_tokens_processed;
 
-        timings.predicted_n            = n_decoded;
-        timings.predicted_ms           = t_token_generation;
-        timings.predicted_per_token_ms = t_token_generation / n_decoded;
-        timings.predicted_per_second   = 1e3 / t_token_generation * n_decoded;
+        timings.predicted_n            = stats.n_gen;
+        timings.predicted_ms           = stats.t_gen_us() / 1000.0;
+        timings.predicted_per_token_ms = stats.t_gen_us() / 1000.0 / stats.n_gen;
+        timings.predicted_per_second   = 1e3 / (stats.t_gen_us() / 1000.0) * stats.n_gen;
 
         // Add speculative metrics
+        const int32_t n_draft_total       = stats.n_draft_tokens;
+        const int32_t n_draft_accepted    = stats.n_draft_accepted;
         if (n_draft_total > 0) {
             timings.draft_n          = n_draft_total;
             timings.draft_n_accepted = n_draft_accepted;
@@ -865,8 +870,8 @@ struct server_slot {
 
         other.i_batch = i_batch;
 
-        other.t_start_process_prompt    = t_start_process_prompt;
-        other.t_prompt_processing       = t_prompt_processing;
+        other.t_start_process_prompt    = 0;
+        other.t_prompt_processing       = 0;
         other.n_prompt_tokens_cache     = n_prompt_tokens_cache;
         other.n_prompt_tokens_processed = n_prompt_tokens_processed;
         other.n_prompt_tokens_lcp       = n_prompt_tokens_lcp;
@@ -2876,20 +2881,20 @@ private:
                     res->n_tasks_deferred    = queue_tasks.queue_tasks_deferred_size();
                     res->t_start             = metrics.t_start;
 
-                    res->n_prompt_tokens_processed_total = metrics.n_prompt_tokens_processed_total;
-                    res->t_prompt_processing_total       = metrics.t_prompt_processing_total;
-                    res->n_tokens_predicted_total        = metrics.n_tokens_predicted_total;
-                    res->t_tokens_generation_total       = metrics.t_tokens_generation_total;
+                    res->n_prompt_tokens_processed_total = metrics.prompt.count;
+                    res->t_prompt_processing_total       = metrics.prompt.time;
+                    res->n_tokens_predicted_total        = metrics.predict.count;
+                    res->t_tokens_generation_total       = metrics.predict.time;
 
                     res->n_tokens_max = metrics.n_tokens_max;
 
-                    res->n_prompt_tokens_processed = metrics.n_prompt_tokens_processed;
-                    res->t_prompt_processing       = metrics.t_prompt_processing;
-                    res->n_tokens_predicted        = metrics.n_tokens_predicted;
-                    res->t_tokens_generation       = metrics.t_tokens_generation;
+                    res->n_prompt_tokens_processed = metrics.prompt.count;
+                    res->t_prompt_processing       = metrics.prompt.time;
+                    res->n_tokens_predicted        = metrics.predict.count;
+                    res->t_tokens_generation       = metrics.predict.time;
 
-                    res->n_decode_total          = metrics.n_decode_total;
-                    res->n_busy_slots_total      = metrics.n_busy_slots_total;
+                    res->n_decode_total          = metrics.n_decode;
+                    res->n_busy_slots_total      = metrics.n_busy_slots;
 
                     for (const server_slot & slot : slots) {
                         llama_kv_tail_coverage_aggregate tail_coverage;
@@ -2912,10 +2917,10 @@ private:
                         res->prompt_cache_restore_failures = prompt_cache->restore_failures;
                         res->prompt_cache_accounted_bytes = prompt_cache->accounted_size();
                     }
-                    res->n_draft_tokens_total      = metrics.n_draft_tokens_total;
-                    res->n_draft_accepted_total    = metrics.n_draft_accepted_total;
-                    res->n_draft_verif_steps_total = metrics.n_draft_verif_steps_total;
-                    res->n_accepted_per_pos_total  = metrics.n_accepted_per_pos_total;
+                    res->n_draft_tokens_total      = metrics.n_draft_tokens;
+                    res->n_draft_accepted_total    = metrics.n_draft_accepted;
+                    res->n_draft_verif_steps_total = metrics.n_draft_verif_steps;
+                    res->n_accepted_per_pos_total  = metrics.n_accepted_per_pos;
 
                     if (task.metrics_reset_bucket) {
                         metrics.reset_bucket();
@@ -4426,8 +4431,6 @@ private:
                 apply_adaptive_profit_decision(slot);
             }
 
-            slot.n_decoded += 1;
-
             if (slot.stats.n_gen == 1) {
                 slot.stats.update_prompt_last();
                 slot.t_print_last = t_now;
@@ -4590,8 +4593,8 @@ private:
             if (slot.n_accepted_per_pos.empty()) {
                 slot.n_accepted_per_pos.resize(common_speculative_n_max(&params_base.speculative), 0);
             }
-            for (size_t i = 0; i < n_accepted && i < n_accepted_per_pos.size(); ++i) {
-                n_accepted_per_pos[i]++;
+            for (size_t i = 0; i < n_accepted && i < slot.n_accepted_per_pos.size(); ++i) {
+                slot.n_accepted_per_pos[i]++;
             }
 
             // add accepted tokens to the prompt
@@ -5301,122 +5304,41 @@ void server_routes::init_routes() {
         auto res_task = dynamic_cast<server_task_result_metrics*>(result.get());
         GGML_ASSERT(res_task != nullptr);
 
-        // metrics definition: https://prometheus.io/docs/practices/naming/#metric-names
-        json all_metrics_def = json {
-            {"counter", {{
-                    {"name",  "prompt_tokens_total"},
-                    {"help",  "Number of prompt tokens processed."},
-                    {"value",  (uint64_t) res_task->n_prompt_tokens_processed_total}
-            }, {
-                    {"name",  "prompt_seconds_total"},
-                    {"help",  "Prompt process time"},
-                    {"value",  (uint64_t) res_task->t_prompt_processing_total / 1.e3}
-            }, {
-                    {"name",  "tokens_predicted_total"},
-                    {"help",  "Number of generation tokens processed."},
-                    {"value",  (uint64_t) res_task->n_tokens_predicted_total}
-            }, {
-                    {"name",  "tokens_predicted_seconds_total"},
-                    {"help",  "Predict process time"},
-                    {"value",  (uint64_t) res_task->t_tokens_generation_total / 1.e3}
-            }, {
-                    {"name",  "n_decode_total"},
-                    {"help",  "Total number of llama_decode() calls"},
-                    {"value",  res_task->n_decode_total}
-            }, {
-                    {"name",  "n_tokens_max"},
-                    {"help",  "Largest observed n_tokens."},
-                    {"value",  res_task->n_tokens_max}
-            }, {
-                    {"name",  "spec_decode_num_draft_tokens_total"},
-                    {"help",  "Total draft tokens generated"},
-                    {"value",  res_task->n_draft_tokens_total}
-            }, {
-                    {"name",  "spec_decode_num_accepted_tokens_total"},
-                    {"help",  "Total draft tokens accepted by the target model"},
-                    {"value",  res_task->n_draft_accepted_total}
-            }, {
-                    {"name",  "spec_decode_num_drafts_total"},
-                    {"help",  "Total speculative decoding verification steps"},
-                    {"value",  res_task->n_draft_verif_steps_total}
-            }, {
-                    {"name",  "prompt_cache_admission_attempts_total"},
-                    {"help",  "Total immutable RAM prompt-cache admission attempts"},
-                    {"value",  res_task->prompt_cache_admission_attempts}
-            }, {
-                    {"name",  "prompt_cache_admission_successes_total"},
-                    {"help",  "Total immutable RAM prompt-cache admissions"},
-                    {"value",  res_task->prompt_cache_admission_successes}
-            }, {
-                    {"name",  "prompt_cache_admission_failures_total"},
-                    {"help",  "Total rejected RAM prompt-cache admissions"},
-                    {"value",  res_task->prompt_cache_admission_failures}
-            }, {
-                    {"name",  "prompt_cache_restore_attempts_total"},
-                    {"help",  "Total transactional RAM prompt-cache restore attempts"},
-                    {"value",  res_task->prompt_cache_restore_attempts}
-            }, {
-                    {"name",  "prompt_cache_restore_successes_total"},
-                    {"help",  "Total committed RAM prompt-cache restores"},
-                    {"value",  res_task->prompt_cache_restore_successes}
-            }, {
-                    {"name",  "prompt_cache_restore_failures_total"},
-                    {"help",  "Total aborted RAM prompt-cache restores"},
-                    {"value",  res_task->prompt_cache_restore_failures}
-            }}},
-            {"gauge", {{
-                    {"name",  "prompt_tokens_seconds"},
-                    {"help",  "Average prompt throughput in tokens/s."},
-                    {"value",  res_task->n_prompt_tokens_processed ? 1.e3 / res_task->t_prompt_processing * res_task->n_prompt_tokens_processed : 0.}
-            },{
-                    {"name",  "predicted_tokens_seconds"},
-                    {"help",  "Average generation throughput in tokens/s."},
-                    {"value",  res_task->n_tokens_predicted ? 1.e3 / res_task->t_tokens_generation * res_task->n_tokens_predicted : 0.}
-            },{
-                    {"name",  "requests_processing"},
-                    {"help",  "Number of requests processing."},
-                    {"value",  (uint64_t) res_task->n_processing_slots}
-            },{
-                    {"name",  "requests_deferred"},
-                    {"help",  "Number of requests deferred."},
-                    {"value",  (uint64_t) res_task->n_tasks_deferred}
-            },{
-                    {"name",  "n_busy_slots_per_decode"},
-                    {"help",  "Average number of busy slots per llama_decode() call"},
-                    {"value",  (float) res_task->n_busy_slots_total / std::max((float) res_task->n_decode_total, 1.f)}
-            },{
-                    {"name",  "kv_tail_requested_tokens"},
-                    {"help",  "Configured exact-tail tokens currently requested across server slots and cache groups."},
-                    {"value",  res_task->kv_tail_requested}
-            },{
-                    {"name",  "kv_tail_exact_tokens"},
-                    {"help",  "Exact-tail tokens currently covered across server slots and cache groups."},
-                    {"value",  res_task->kv_tail_exact}
-            },{
-                    {"name",  "kv_tail_complete_groups"},
-                    {"help",  "Server slot cache groups with complete exact-tail coverage."},
-                    {"value",  res_task->kv_tail_complete_groups}
-            },{
-                    {"name",  "kv_tail_partial_groups"},
-                    {"help",  "Server slot cache groups with partial exact-tail coverage."},
-                    {"value",  res_task->kv_tail_partial_groups}
-            },{
-                    {"name",  "kv_tail_none_groups"},
-                    {"help",  "Server slot cache groups with no exact-tail coverage."},
-                    {"value",  res_task->kv_tail_none_groups}
-            },{
-                    {"name",  "kv_tail_degraded_sequences"},
-                    {"help",  "Server slots reporting an explicit exact-tail degradation reason."},
-                    {"value",  res_task->kv_tail_degraded_sequences}
-            },{
-                    {"name",  "prompt_cache_accounted_bytes"},
-                    {"help",  "Serialized RAM prompt-cache payload bytes, deduplicating shared checkpoint buffers; excludes container and allocator overhead."},
-                    {"value",  res_task->prompt_cache_accounted_bytes}
-            }}}
-        };
+        json all_metrics_def = json::object();
+        all_metrics_def["counter"] = json::array({
+            json::object({{"name", "prompt_tokens_total"}, {"help", "Number of prompt tokens processed."}, {"value", (uint64_t) res_task->n_prompt_tokens_processed_total}}),
+            json::object({{"name", "prompt_seconds_total"}, {"help", "Prompt process time."}, {"value", (uint64_t) res_task->t_prompt_processing_total / 1.e3}}),
+            json::object({{"name", "tokens_predicted_total"}, {"help", "Number of generation tokens processed."}, {"value", (uint64_t) res_task->n_tokens_predicted_total}}),
+            json::object({{"name", "tokens_predicted_seconds_total"}, {"help", "Predict process time."}, {"value", (uint64_t) res_task->t_tokens_generation_total / 1.e3}}),
+            json::object({{"name", "n_decode_total"}, {"help", "Total number of llama_decode() calls"}, {"value", res_task->n_decode_total}}),
+            json::object({{"name", "n_tokens_max"}, {"help", "Largest observed n_tokens."}, {"value", res_task->n_tokens_max}}),
+            json::object({{"name", "spec_decode_num_draft_tokens_total"}, {"help", "Total draft tokens generated"}, {"value", res_task->n_draft_tokens_total}}),
+            json::object({{"name", "spec_decode_num_accepted_tokens_total"}, {"help", "Total draft tokens accepted by the target model"}, {"value", res_task->n_draft_accepted_total}}),
+            json::object({{"name", "spec_decode_num_drafts_total"}, {"help", "Total speculative decoding verification steps"}, {"value", res_task->n_draft_verif_steps_total}}),
+            json::object({{"name", "prompt_cache_admission_attempts_total"}, {"help", "Total immutable RAM prompt-cache admission attempts"}, {"value", res_task->prompt_cache_admission_attempts}}),
+            json::object({{"name", "prompt_cache_admission_successes_total"}, {"help", "Total immutable RAM prompt-cache admissions"}, {"value", res_task->prompt_cache_admission_successes}}),
+            json::object({{"name", "prompt_cache_admission_failures_total"}, {"help", "Total rejected RAM prompt-cache admissions"}, {"value", res_task->prompt_cache_admission_failures}}),
+            json::object({{"name", "prompt_cache_restore_attempts_total"}, {"help", "Total transactional RAM prompt-cache restore attempts"}, {"value", res_task->prompt_cache_restore_attempts}}),
+            json::object({{"name", "prompt_cache_restore_successes_total"}, {"help", "Total committed RAM prompt-cache restores"}, {"value", res_task->prompt_cache_restore_successes}}),
+            json::object({{"name", "prompt_cache_restore_failures_total"}, {"help", "Total aborted RAM prompt-cache restores"}, {"value", res_task->prompt_cache_restore_failures}})
+        });
+        all_metrics_def["gauge"] = json::array({
+            json::object({{"name", "prompt_tokens_seconds"}, {"help", "Average prompt throughput in tokens/s."}, {"value", res_task->n_prompt_tokens_processed ? 1.e3 / res_task->t_prompt_processing * res_task->n_prompt_tokens_processed : 0.}}),
+            json::object({{"name", "predicted_tokens_seconds"}, {"help", "Average generation throughput in tokens/s."}, {"value", res_task->n_tokens_predicted ? 1.e3 / res_task->t_tokens_generation * res_task->n_tokens_predicted : 0.}}),
+            json::object({{"name", "requests_processing"}, {"help", "Number of requests processing."}, {"value", (uint64_t) res_task->n_processing_slots}}),
+            json::object({{"name", "requests_deferred"}, {"help", "Number of requests deferred."}, {"value", (uint64_t) res_task->n_tasks_deferred}}),
+            json::object({{"name", "n_busy_slots_per_decode"}, {"help", "Average number of busy slots per llama_decode() call"}, {"value", (float) res_task->n_busy_slots_total / std::max((float) res_task->n_decode_total, 1.f)}}),
+            json::object({{"name", "kv_tail_requested_tokens"}, {"help", "Configured exact-tail tokens currently requested across server slots and cache groups."}, {"value", res_task->kv_tail_requested}}),
+            json::object({{"name", "kv_tail_exact_tokens"}, {"help", "Exact-tail tokens currently covered across server slots and cache groups."}, {"value", res_task->kv_tail_exact}}),
+            json::object({{"name", "kv_tail_complete_groups"}, {"help", "Server slot cache groups with complete exact-tail coverage."}, {"value", res_task->kv_tail_complete_groups}}),
+            json::object({{"name", "kv_tail_partial_groups"}, {"help", "Server slot cache groups with partial exact-tail coverage."}, {"value", res_task->kv_tail_partial_groups}}),
+            json::object({{"name", "kv_tail_none_groups"}, {"help", "Server slot cache groups with no exact-tail coverage."}, {"value", res_task->kv_tail_none_groups}}),
+            json::object({{"name", "kv_tail_degraded_sequences"}, {"help", "Server slots reporting an explicit exact-tail degradation reason."}, {"value", res_task->kv_tail_degraded_sequences}}),
+            json::object({{"name", "prompt_cache_accounted_bytes"}, {"help", "Serialized RAM prompt-cache payload bytes."}, {"value", res_task->prompt_cache_accounted_bytes}})
+        });
 
         if (queue_tasks.is_sleeping()) {
-            use_cached_metrics();
+            use_cached_metrics(res.get());
 
         } else {
             // request slots data using task queue
@@ -5434,7 +5356,7 @@ void server_routes::init_routes() {
             });
             if (!result) {
                 if (!req.should_stop()) {
-                    use_cached_metrics();
+                    use_cached_metrics(res.get());
                 }
                 return res;
             }
@@ -6327,4 +6249,25 @@ void server_routes::update_cached_responses(bool is_sleeping) {
 
         should_reset_buckets = false;
     }
+}
+
+void server_routes::use_cached_metrics(server_res_generator * res) {
+    std::lock_guard<std::mutex> lock(mutex_cache);
+
+    json all_metrics_def = json::object();
+    all_metrics_def["counter"] = json::array();
+    all_metrics_def["counter"].push_back(json::object({{"name", "prompt_tokens_total"}, {"help", "Number of prompt tokens processed."}, {"value", (uint64_t) cached_metrics.prompt.count}}));
+    all_metrics_def["counter"].push_back(json::object({{"name", "prompt_seconds_total"}, {"help", "Prompt process time."}, {"value", (uint64_t) cached_metrics.prompt.time / 1.e3}}));
+    all_metrics_def["counter"].push_back(json::object({{"name", "tokens_predicted_total"}, {"help", "Number of generation tokens processed."}, {"value", (uint64_t) cached_metrics.predict.count}}));
+    all_metrics_def["counter"].push_back(json::object({{"name", "tokens_predicted_seconds_total"}, {"help", "Predict process time."}, {"value", (uint64_t) cached_metrics.predict.time / 1.e3}}));
+    all_metrics_def["counter"].push_back(json::object({{"name", "n_decode_total"}, {"help", "Total number of llama_decode() calls"}, {"value", cached_metrics.n_decode}}));
+    all_metrics_def["counter"].push_back(json::object({{"name", "n_tokens_max"}, {"help", "Largest observed n_tokens."}, {"value", cached_metrics.n_tokens_max}}));
+    all_metrics_def["counter"].push_back(json::object({{"name", "spec_decode_num_draft_tokens_total"}, {"help", "Total draft tokens generated"}, {"value", cached_metrics.n_draft_tokens}}));
+    all_metrics_def["counter"].push_back(json::object({{"name", "spec_decode_num_accepted_tokens_total"}, {"help", "Total draft tokens accepted by the target model"}, {"value", cached_metrics.n_draft_accepted}}));
+    all_metrics_def["counter"].push_back(json::object({{"name", "spec_decode_num_drafts_total"}, {"help", "Total speculative decoding verification steps"}, {"value", cached_metrics.n_draft_verif_steps}}));
+
+    res->headers["Process-Start-Time-Unix"] = std::to_string(cached_metrics.t_start);
+    res->content_type = "text/plain; version=0.0.4";
+    res->status = 200;
+    res->data = safe_json_to_str(all_metrics_def);
 }

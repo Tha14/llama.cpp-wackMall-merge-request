@@ -8,6 +8,7 @@
 #include <cassert>
 #include <cstring>
 #include <limits>
+#include <map>
 #include <set>
 #include <vector>
 
