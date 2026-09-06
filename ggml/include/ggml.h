@@ -438,7 +438,12 @@ extern "C" {
         GGML_TYPE_Q3_1    = 46,
         GGML_TYPE_Q2_0S   = 47,
         GGML_TYPE_Q2_1    = 48,
-        GGML_TYPE_COUNT   = 49,
+        GGML_TYPE_TURBO2_0 = 49, // TurboQuant 2-bit KV cache: WHT + 2-bit PolarQuant (runtime-only KV type)
+        GGML_TYPE_TURBO3_0 = 50, // TurboQuant 3-bit KV cache: WHT + 3-bit PolarQuant (runtime-only KV type)
+        GGML_TYPE_TQ3_1S   = 51, // TurboQuant 3-bit weight: WHT-rotated 8-level Lloyd-Max, block_size=32
+        GGML_TYPE_TQ4_1S   = 52, // TurboQuant 4-bit weight: WHT-rotated 16-level Lloyd-Max, block_size=32
+        GGML_TYPE_TURBO4_0 = 53, // TurboQuant 4-bit KV cache: WHT + 4-bit PolarQuant (runtime-only KV type)
+        GGML_TYPE_COUNT    = 54,
     };
 
     // precision
@@ -447,12 +452,13 @@ extern "C" {
         GGML_PREC_F32     = 10,
     };
 
-    // FLASH_ATTN_EXT op_params shared by the generic precision hint and KVarN's
-    // descriptor-native domain contract.
+    // FLASH_ATTN_EXT op params shared by the generic precision hint and the
+    // exact-KV tail contract. KVARN_DOMAIN is reserved for a KVarN-only domain
+    // contract; keep the index free.
     enum ggml_flash_attn_ext_op_param {
-        GGML_FLASH_ATTN_EXT_OP_PARAM_PREC         = 3,
-        GGML_FLASH_ATTN_EXT_OP_PARAM_KVARN_DOMAIN = 4,
-        GGML_FLASH_ATTN_EXT_OP_PARAM_TAIL_BODYLESS = 5,
+        GGML_FLASH_ATTN_EXT_OP_PARAM_PREC              = 3,
+        GGML_FLASH_ATTN_EXT_OP_PARAM_KVARN_DOMAIN      = 4,
+        GGML_FLASH_ATTN_EXT_OP_PARAM_TAIL_BODYLESS     = 5,
         GGML_FLASH_ATTN_EXT_OP_PARAM_TAIL_HISTORY_SLOTS = 6,
     };
 
@@ -607,13 +613,6 @@ extern "C" {
         GGML_OP_KVARN_VIEW,
         GGML_OP_KVARN_MATERIALIZE,
 
-        // KVarN record-oriented KV-cache operators.  They are not GGUF
-        // tensor types and are never serialized in model weights.
-        GGML_OP_KVARN_WHT,
-        GGML_OP_KVARN_STORE,
-        GGML_OP_KVARN_VIEW,
-        GGML_OP_KVARN_MATERIALIZE,
-
         GGML_OP_UNARY,
 
         GGML_OP_MAP_CUSTOM1,
@@ -667,9 +666,9 @@ extern "C" {
         GGML_GLU_OP_GEGLU,
         GGML_GLU_OP_SWIGLU,
         GGML_GLU_OP_SWIGLU_OAI,
+        GGML_GLU_OP_SWIGLU_CLAMP,
         GGML_GLU_OP_GEGLU_ERF,
         GGML_GLU_OP_GEGLU_QUICK,
-        GGML_GLU_OP_SWIGLU_CLAMP,
 
         GGML_GLU_OP_COUNT,
     };
@@ -1408,12 +1407,6 @@ extern "C" {
             struct ggml_tensor  * a,
             struct ggml_tensor  * b,
             float                 alpha,
-            float                 limit);
-
-    GGML_API struct ggml_tensor * ggml_swiglu_clamp(
-            struct ggml_context * ctx,
-            struct ggml_tensor  * a,
-            struct ggml_tensor  * b,
             float                 limit);
 
     // normalize along rows
@@ -2556,12 +2549,6 @@ extern "C" {
 
     GGML_API enum ggml_prec ggml_flash_attn_ext_get_prec(
             const struct ggml_tensor * a);
-
-    // Use finite mask entries as a sparse K/V set. Set 0 to disable.
-    // n_kv_max must bound the number of finite entries in every mask row.
-    GGML_API void ggml_flash_attn_ext_set_n_kv_max(
-            struct ggml_tensor * a,
-            int32_t              n_kv_max);
 
     GGML_API void ggml_flash_attn_ext_add_sinks(
             struct ggml_tensor * a,

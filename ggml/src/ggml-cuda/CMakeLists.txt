@@ -140,12 +140,33 @@ if (CUDAToolkit_FOUND)
             list(GET PARTS 1 V_TYPE)
             ggml_add_fattn_vec_pair(GGML_SOURCES_CUDA "${FA_VEC_PREFIX}" "${K_TYPE}" "${V_TYPE}")
         endforeach()
+        list(APPEND GGML_SOURCES_CUDA
+            template-instances/fattn-vec-instance-turbo3_0-turbo3_0.cu
+            template-instances/fattn-vec-instance-turbo3_0-q8_0.cu
+            template-instances/fattn-vec-instance-q8_0-turbo3_0.cu
+            template-instances/fattn-vec-instance-turbo2_0-turbo2_0.cu
+            template-instances/fattn-vec-instance-turbo2_0-q8_0.cu
+            template-instances/fattn-vec-instance-q8_0-turbo2_0.cu
+            template-instances/fattn-vec-instance-turbo3_0-turbo2_0.cu
+            template-instances/fattn-vec-instance-turbo2_0-turbo3_0.cu
+            template-instances/fattn-vec-instance-turbo4_0-turbo4_0.cu
+            template-instances/fattn-vec-instance-turbo4_0-q8_0.cu
+            template-instances/fattn-vec-instance-q8_0-turbo4_0.cu
+            template-instances/fattn-vec-instance-turbo4_0-turbo3_0.cu
+            template-instances/fattn-vec-instance-turbo3_0-turbo4_0.cu
+            template-instances/fattn-vec-instance-turbo4_0-turbo2_0.cu
+            template-instances/fattn-vec-instance-turbo2_0-turbo4_0.cu
+            template-instances/fattn-vec-instance-f16-q8_0.cu
+            template-instances/fattn-vec-instance-f16-turbo3_0.cu
+            template-instances/fattn-vec-instance-f16-turbo4_0.cu)
     endif()
 
     ggml_add_backend_library(ggml-cuda
                              ${GGML_HEADERS_CUDA}
                              ${GGML_SOURCES_CUDA}
                             )
+
+    add_compile_definitions(GGML_CUDA_PEER_MAX_BATCH_SIZE=${GGML_CUDA_PEER_MAX_BATCH_SIZE})
 
     if (GGML_CUDA_GRAPHS)
         add_compile_definitions(GGML_CUDA_USE_GRAPHS)

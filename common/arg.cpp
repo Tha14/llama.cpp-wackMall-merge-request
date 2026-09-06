@@ -116,11 +116,6 @@ common_arg & common_arg::set_preset_only() {
     return *this;
 }
 
-common_arg & common_arg::set_sensitive() {
-    is_sensitive = true;
-    return *this;
-}
-
 bool common_arg::in_example(enum llama_example ex) {
     return examples.find(ex) != examples.end();
 }
@@ -308,38 +303,6 @@ struct handle_model_result {
     std::string preset_path;
 };
 
-static int32_t kvarn_bits_from_legacy_cache_type(const std::string & value) {
-    if (value == "turbo2" || value == "turbo2_tcq") {
-        return 2;
-    }
-    if (value == "turbo3" || value == "turbo3_tcq") {
-        return 3;
-    }
-    if (value == "turbo4" || value == "turbo4_tcq") {
-        return 4;
-    }
-    return 0;
-}
-
-static ggml_type kvarn_fallback_cache_type(int32_t bits) {
-    switch (bits) {
-        case 2:  return GGML_TYPE_Q2_0S;
-        case 3:  return GGML_TYPE_Q3_0;
-        case 4:  return GGML_TYPE_Q4_0;
-        case 5:  return GGML_TYPE_Q5_0;
-        case 6:  return GGML_TYPE_Q6_0;
-        case 8:  return GGML_TYPE_Q8_0;
-        default: return GGML_TYPE_F16;
-    }
-}
-
-// Upstream now owns GGML_TYPE_Q2_0.  Bee's retained 32-element variant is
-// intentionally presented as q2_0 at the cache CLI boundary, but keeps its
-// distinct internal name (q2_0s) to avoid a serialized-type collision.
-static const char * kv_cache_type_name(ggml_type type) {
-    return type == GGML_TYPE_Q2_0S ? "q2_0" : ggml_type_name(type);
-}
-
 const std::vector<ggml_type> kv_cache_types = {
     GGML_TYPE_F32,
     GGML_TYPE_F16,
@@ -350,130 +313,26 @@ const std::vector<ggml_type> kv_cache_types = {
     GGML_TYPE_IQ4_NL,
     GGML_TYPE_Q5_0,
     GGML_TYPE_Q5_1,
-    GGML_TYPE_Q6_0,
-    GGML_TYPE_Q6_1,
-    GGML_TYPE_Q3_0,
-    GGML_TYPE_Q3_1,
-    GGML_TYPE_Q2_0S,
-    GGML_TYPE_Q2_1,
+    GGML_TYPE_TURBO2_0,
+    GGML_TYPE_TURBO3_0,
+    GGML_TYPE_TURBO4_0,
 };
 
-const std::vector<ggml_type> & common_kv_cache_types() {
-    return kv_cache_types;
-}
-
 static ggml_type kv_cache_type_from_str(const std::string & s) {
-    const int32_t kvarn_bits = kvarn_bits_from_legacy_cache_type(s);
-    if (kvarn_bits != 0) {
-        const std::string replacement = string_format("q%d_0", kvarn_bits);
-        LOG_WRN("cache type '%s' was removed in v0.4.0; redirecting to '%s' for a draft context\n",
-                s.c_str(), replacement.c_str());
-        return kvarn_fallback_cache_type(kvarn_bits);
-    }
-
     for (const auto & type : kv_cache_types) {
-        if (kv_cache_type_name(type) == s) {
+        if (ggml_type_name(type) == s) {
             return type;
         }
     }
     throw std::runtime_error("Unsupported cache type: " + s);
 }
 
-static std::string get_all_kv_cache_types(bool include_kvarn_pseudo_types = false) {
+static std::string get_all_kv_cache_types() {
     std::ostringstream msg;
     for (const auto & type : kv_cache_types) {
-        msg << kv_cache_type_name(type) << (&type == &kv_cache_types.back() ? "" : ", ");
-    }
-    if (include_kvarn_pseudo_types) {
-        msg << ", kvarn2, kvarn3, kvarn4, kvarn5, kvarn6, kvarn8";
+        msg << ggml_type_name(type) << (&type == &kv_cache_types.back() ? "" : ", ");
     }
     return msg.str();
-}
-
-static int32_t kvarn_bits_from_cache_type(const std::string & value) {
-    if (value == "kvarn2") return 2;
-    if (value == "kvarn3") return 3;
-    if (value == "kvarn4") return 4;
-    if (value == "kvarn5") return 5;
-    if (value == "kvarn6") return 6;
-    if (value == "kvarn8") return 8;
-    return 0;
-}
-
-static llama_kvarn_type kvarn_type_from_bits(int32_t key_bits, int32_t value_bits) {
-    return llama_kvarn_type_from_name(
-            string_format("kvarn_k%dv%d_g128", key_bits, value_bits).c_str());
-}
-
-static void parse_target_cache_type(common_params & params, bool key, const std::string & value) {
-    const int32_t redirected_kvarn_bits = kvarn_bits_from_legacy_cache_type(value);
-    const std::string cache_type = redirected_kvarn_bits != 0
-        ? string_format("kvarn%d", redirected_kvarn_bits)
-        : value;
-
-    if (redirected_kvarn_bits != 0) {
-        LOG_WRN("cache type '%s' was removed in v0.4.0; redirecting to '%s'\n",
-                value.c_str(), cache_type.c_str());
-    }
-
-    const int32_t kvarn_bits = kvarn_bits_from_cache_type(cache_type);
-    if (kvarn_bits != 0) {
-        if (key) {
-            params.cache_kvarn_bits_k = kvarn_bits;
-            params.cache_type_k = kvarn_fallback_cache_type(kvarn_bits);
-        } else {
-            params.cache_kvarn_bits_v = kvarn_bits;
-            params.cache_type_v = kvarn_fallback_cache_type(kvarn_bits);
-        }
-        return;
-    }
-
-    if (key) {
-        params.cache_kvarn_bits_k = 0;
-        params.cache_type_k = kv_cache_type_from_str(cache_type);
-    } else {
-        params.cache_kvarn_bits_v = 0;
-        params.cache_type_v = kv_cache_type_from_str(cache_type);
-    }
-}
-
-static void parse_target_kvarn_swa_cache_type(common_params & params, bool key, const std::string & value) {
-    const int32_t redirected_kvarn_bits = kvarn_bits_from_legacy_cache_type(value);
-    const std::string cache_type = redirected_kvarn_bits != 0
-        ? string_format("kvarn%d", redirected_kvarn_bits)
-        : value;
-    if (redirected_kvarn_bits != 0) {
-        LOG_WRN("cache type '%s' was removed in v0.4.0; redirecting to '%s'\n",
-                value.c_str(), cache_type.c_str());
-    }
-
-    const int32_t kvarn_bits = kvarn_bits_from_cache_type(cache_type);
-    if (kvarn_bits == 0) {
-        throw std::runtime_error("SWA KVarN cache overrides require a KVarN pseudo type: " + value);
-    }
-
-    if (key) {
-        params.cache_kvarn_swa_bits_k = kvarn_bits;
-    } else {
-        params.cache_kvarn_swa_bits_v = kvarn_bits;
-    }
-}
-
-static void parse_kv_tail_tokens(common_params & params, const std::string & value) {
-    // Preserve the immutable spelling here. The Bee request descriptor is the
-    // single parser, and every fit probe and final context binds it against
-    // that probe's model manifest.
-    params.kv_tail_tokens = value;
-}
-
-static void parse_kv_tail_type(common_params & params, const std::string & value) {
-    if (value == "f16") {
-        params.kv_tail_type = GGML_TYPE_F16;
-    } else if (value == "bf16") {
-        params.kv_tail_type = GGML_TYPE_BF16;
-    } else {
-        throw std::invalid_argument("--kv-tail-type must be f16 or bf16");
-    }
 }
 
 static bool parse_bool_value(const std::string & value) {
@@ -1133,11 +992,6 @@ static bool common_params_parse_ex(int argc, char ** argv, common_params_context
         ));
     }
 
-    // if the preserve_reasoning kwarg was not specified explicitly, enable it by default
-    if (!params.default_template_kwargs.count("preserve_reasoning")) {
-        params.default_template_kwargs["preserve_reasoning"] = "true";
-    }
-
     return true;
 }
 
@@ -1452,82 +1306,6 @@ static utf8_argv make_utf8_argv() {
 }
 #endif
 
-static void common_params_kvarn_normalize(common_params & params) {
-    int32_t key_bits = params.cache_kvarn_bits_k;
-    int32_t value_bits = params.cache_kvarn_bits_v;
-    const int32_t swa_key_bits = params.cache_kvarn_swa_bits_k;
-    const int32_t swa_value_bits = params.cache_kvarn_swa_bits_v;
-
-    if (key_bits == 0 && value_bits == 0) {
-        if (swa_key_bits != 0 || swa_value_bits != 0) {
-            throw std::invalid_argument("KVarN SWA cache overrides require KVarN --cache-type-k and --cache-type-v");
-        }
-        params.kvarn = llama_kvarn_default_params();
-        return;
-    }
-
-    if (key_bits == 0) {
-        LOG_WRN("warning: --cache-type-v uses KVarN but --cache-type-k is %s; forcing K to kvarn%d\n",
-                kv_cache_type_name(params.cache_type_k), value_bits);
-        key_bits = value_bits;
-    } else if (value_bits == 0) {
-        LOG_WRN("warning: --cache-type-k uses KVarN but --cache-type-v is %s; forcing V to kvarn%d\n",
-                kv_cache_type_name(params.cache_type_v), key_bits);
-        value_bits = key_bits;
-    }
-
-    const llama_kvarn_type type = kvarn_type_from_bits(key_bits, value_bits);
-    if (type == LLAMA_KVARN_TYPE_INVALID) {
-        throw std::invalid_argument(string_format(
-                "invalid KVarN cache type combination: kvarn%d/kvarn%d", key_bits, value_bits));
-    }
-
-    params.kvarn = llama_kvarn_params_for_type(type);
-    params.cache_kvarn_bits_k = key_bits;
-    params.cache_kvarn_bits_v = value_bits;
-    params.cache_type_k = kvarn_fallback_cache_type(key_bits);
-    params.cache_type_v = kvarn_fallback_cache_type(value_bits);
-
-    if ((swa_key_bits == 0) != (swa_value_bits == 0)) {
-        throw std::invalid_argument("KVarN SWA cache overrides require both --cache-type-k-swa and --cache-type-v-swa");
-    }
-
-    if (swa_key_bits != 0) {
-        const llama_kvarn_type swa_type = kvarn_type_from_bits(swa_key_bits, swa_value_bits);
-        if (swa_type == LLAMA_KVARN_TYPE_INVALID) {
-            throw std::invalid_argument(string_format(
-                    "invalid KVarN SWA cache type combination: kvarn%d/kvarn%d", swa_key_bits, swa_value_bits));
-        }
-        params.kvarn.swa_key_bits = swa_key_bits;
-        params.kvarn.swa_value_bits = swa_value_bits;
-    }
-
-    if (params.grp_attn_n != 1) {
-        throw std::invalid_argument("KVarN does not support Self-Extend/group attention; use --grp-attn-n 1");
-    }
-}
-
-static common_speculative_dm_controller common_speculative_dm_controller_from_name(const std::string & value) {
-    if (value == "off") {
-        return COMMON_SPECULATIVE_DM_CONTROLLER_OFF;
-    }
-    if (value == "profit") {
-        return COMMON_SPECULATIVE_DM_CONTROLLER_PROFIT;
-    }
-    if (value == "fringe") {
-        throw std::invalid_argument("the fringe adaptive draft-max controller was removed in v0.4.0; use profit or off");
-    }
-    throw std::invalid_argument("invalid spec-dm-controller, expected one of: off, profit");
-}
-
-static const char * common_speculative_dm_controller_name(common_speculative_dm_controller value) {
-    switch (value) {
-        case COMMON_SPECULATIVE_DM_CONTROLLER_OFF:    return "off";
-        case COMMON_SPECULATIVE_DM_CONTROLLER_PROFIT: return "profit";
-    }
-    return "unknown";
-}
-
 bool common_params_parse(int argc, char ** argv, common_params & params, llama_example ex, void(*print_usage)(int, char **)) {
 #ifdef _WIN32
     auto utf8 = make_utf8_argv();
@@ -1557,11 +1335,7 @@ bool common_params_parse(int argc, char ** argv, common_params & params, llama_e
             common_params_print_completion(ctx_arg);
             exit(0);
         }
-        common_params_kvarn_normalize(ctx_arg.params);
-        ctx_arg.params.lr.init();
-        common_validate_reasoning_loop_guard_params(ctx_arg.params.reasoning_loop_guard);
-        ctx_arg.params.sampling.reasoning_budget_tracking =
-            ctx_arg.params.reasoning_loop_guard.mode != COMMON_REASONING_LOOP_GUARD_OFF;
+        params.lr.init();
     } catch (const std::invalid_argument & ex) {
         fprintf(stderr, "%s\n", ex.what());
         ctx_arg.params = params_org;
@@ -1901,14 +1675,6 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
             }
         }
     ).set_env("LLAMA_ARG_CTX_SIZE"));
-    add_opt(common_arg(
-        { "--kv-unified-per-slot" }, "N",
-        "context limit per parallel slot (default: unset, behavior unchanged).\n"
-        "when set without -c/--ctx-size, the shared KV pool is sized to n_parallel*N",
-        [](common_params & params, int value) {
-            params.kv_unified_per_slot = value;
-        }
-    ).set_env("LLAMA_ARG_KV_UNIFIED_PER_SLOT").set_examples({ LLAMA_EXAMPLE_SERVER }));
     add_opt(common_arg(
         {"-n", "--predict", "--n-predict"}, "N",
         string_format(
@@ -2694,11 +2460,11 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
             "KV cache data type for K\n"
             "allowed values: %s\n"
             "(default: %s)",
-            get_all_kv_cache_types(/*include_kvarn_pseudo_types =*/ true).c_str(),
-            kv_cache_type_name(params.cache_type_k)
+            get_all_kv_cache_types().c_str(),
+            ggml_type_name(params.cache_type_k)
         ),
         [](common_params & params, const std::string & value) {
-            parse_target_cache_type(params, /*key =*/ true, value);
+            params.cache_type_k = kv_cache_type_from_str(value);
         }
     ).set_env("LLAMA_ARG_CACHE_TYPE_K"));
     add_opt(common_arg(
@@ -2707,48 +2473,13 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
             "KV cache data type for V\n"
             "allowed values: %s\n"
             "(default: %s)",
-            get_all_kv_cache_types(/*include_kvarn_pseudo_types =*/ true).c_str(),
-            kv_cache_type_name(params.cache_type_v)
+            get_all_kv_cache_types().c_str(),
+            ggml_type_name(params.cache_type_v)
         ),
         [](common_params & params, const std::string & value) {
-            parse_target_cache_type(params, /*key =*/ false, value);
+            params.cache_type_v = kv_cache_type_from_str(value);
         }
     ).set_env("LLAMA_ARG_CACHE_TYPE_V"));
-    add_opt(common_arg(
-        {"--kv-tail-tokens"}, "SPEC",
-        "exact KV-cache tail: 0, auto, N, positional list, or named group list\n"
-        "KVarN always retains an intrinsic 128-token exact suffix\n"
-        "(default: 0)",
-        [](common_params & params, const std::string & value) {
-            parse_kv_tail_tokens(params, value);
-        }
-    ).set_env("LLAMA_ARG_KV_TAIL_TOKENS"));
-    add_opt(common_arg(
-        {"--kv-tail-type"}, "TYPE",
-        "exact KV-cache tail type: f16 or bf16\n"
-        "(default: bf16 for standard caches, f16 for KVarN)",
-        [](common_params & params, const std::string & value) {
-            parse_kv_tail_type(params, value);
-        }
-    ).set_env("LLAMA_ARG_KV_TAIL_TYPE"));
-    add_opt(common_arg(
-        {"--cache-type-k-swa"}, "TYPE",
-        "SWA-layer KVarN cache type override for K\n"
-        "allowed values: kvarn2, kvarn3, kvarn4, kvarn5, kvarn6, kvarn8\n"
-        "(default: same as --cache-type-k)",
-        [](common_params & params, const std::string & value) {
-            parse_target_kvarn_swa_cache_type(params, /*key =*/ true, value);
-        }
-    ).set_env("LLAMA_ARG_CACHE_TYPE_K_SWA"));
-    add_opt(common_arg(
-        {"--cache-type-v-swa"}, "TYPE",
-        "SWA-layer KVarN cache type override for V\n"
-        "allowed values: kvarn2, kvarn3, kvarn4, kvarn5, kvarn6, kvarn8\n"
-        "(default: same as --cache-type-v)",
-        [](common_params & params, const std::string & value) {
-            parse_target_kvarn_swa_cache_type(params, /*key =*/ false, value);
-        }
-    ).set_env("LLAMA_ARG_CACHE_TYPE_V_SWA"));
     add_opt(common_arg(
         {"--hellaswag"},
         "compute HellaSwag score over random tasks from datafile supplied with -f",
@@ -2945,27 +2676,6 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
             params.mtmd_batch_max_tokens = value;
         }
     ).set_examples({LLAMA_EXAMPLE_SERVER}).set_env("LLAMA_ARG_MTMD_BATCH_MAX_TOKENS"));
-    add_opt(common_arg(
-        {"--video-fps"}, "N",
-        string_format("target video frame rate (default: %.1f)", params.video_fps),
-        [](common_params & params, const std::string & value) {
-            params.video_fps = std::stof(value);
-        }
-    ).set_examples(mmproj_examples).set_env("LLAMA_ARG_VIDEO_FPS"));
-    add_opt(common_arg(
-        {"--video-timestamp-interval"}, "N",
-        string_format("interval in milliseconds between text timestamps (default: %" PRId64 ")", params.video_timestamp_interval_ms),
-        [](common_params & params, int value) {
-            params.video_timestamp_interval_ms = value;
-        }
-    ).set_examples(mmproj_examples).set_env("LLAMA_ARG_VIDEO_TIMESTAMP_INTERVAL"));
-    add_opt(common_arg(
-        {"--video-ffmpeg-dir"}, "DIR",
-        "path to the directory containing ffmpeg and ffprobe (default: search in PATH)",
-        [](common_params & params, const std::string & value) {
-            params.video_ffmpeg_bin_dir = value;
-        }
-    ).set_examples(mmproj_examples).set_env("LLAMA_ARG_VIDEO_FFMPEG_DIR"));
     if (params.is_gen_docs || llama_supports_rpc()) {
         add_opt(common_arg(
             {"--rpc"}, "SERVERS",
@@ -3022,19 +2732,6 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         }
     ).set_env("LLAMA_ARG_LOAD_MODE"));
     add_opt(common_arg(
-        {"-lzm", "--lazy-mode"}, "MODE",
-        "on-demand reading of certain tensors, for example per-layer embeddings (default: auto)\n"
-        "- on: read the rows of such tensors from disk on demand instead of keeping them resident (requires mmap)\n"
-        "- auto: on, but only for tensors larger than 4 GiB\n"
-        "- off: always keep them resident",
-        [](common_params & params, const std::string & value) {
-            /**/ if (value == "on")   { params.lazy_mode = LLAMA_LAZY_MODE_ON;   }
-            else if (value == "auto") { params.lazy_mode = LLAMA_LAZY_MODE_AUTO; }
-            else if (value == "off")  { params.lazy_mode = LLAMA_LAZY_MODE_OFF;  }
-            else { throw std::invalid_argument("invalid value"); }
-        }
-    ).set_env("LLAMA_ARG_LAZY_MODE"));
-    add_opt(common_arg(
         {"--numa"}, "TYPE",
         "attempt optimizations that help on some NUMA systems\n"
         "- distribute: spread execution evenly over all nodes\n"
@@ -3085,20 +2782,169 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
             if (value < 0) {
                 throw std::invalid_argument("invalid value");
             }
-            llm_add_n_cpu_ffn_overrides(value, LLM_FFN_EXPS_REGEX, params.tensor_buft_overrides);
+            for (int i = 0; i < value; ++i) {
+                // keep strings alive and avoid leaking memory by storing them in a static vector
+                static std::list<std::string> buft_overrides;
+                buft_overrides.push_back(llm_ffn_exps_block_regex(i));
+                params.tensor_buft_overrides.push_back({buft_overrides.back().c_str(), ggml_backend_cpu_buffer_type()});
+            }
         }
     ).set_env("LLAMA_ARG_N_CPU_MOE"));
     add_opt(common_arg(
-        {"-ncffn", "--n-cpu-ffn"}, "N",
-        "keep the dense FFN weights of the first N layers in the CPU\n"
-        "(dense models; for MoE expert weights use --n-cpu-moe)",
-        [](common_params & params, int value) {
-            if (value < 0) {
-                throw std::invalid_argument("invalid value");
-            }
-            llm_add_n_cpu_ffn_overrides(value, LLM_FFN_DENSE_REGEX, params.tensor_buft_overrides);
+        {"--expert-heat-decay"}, "F",
+        "expert heatmap decay rate per update (default: 0.999)",
+        [](common_params & params, const std::string & value) {
+            params.expert_heat_decay = std::stof(value);
         }
-    ).set_env("LLAMA_ARG_N_CPU_FFN"));
+    ).set_env("LLAMA_ARG_EXPERT_HEAT_DECAY"));
+    add_opt(common_arg(
+        {"--expert-heat-log-period"}, "N",
+        "print the expert heatmap at generation end (default: 0, 0 = off)",
+        [](common_params & params, int value) {
+            params.expert_heat_log_period = value;
+        }
+    ).set_env("LLAMA_ARG_EXPERT_HEAT_LOG_PERIOD"));
+    add_opt(common_arg(
+        {"--expert-sync-period"}, "N",
+        "expert hot store re-sync cadence in tokens (default: 1)",
+        [](common_params & params, int value) {
+            params.expert_sync_period = value;
+        }
+    ).set_env("LLAMA_ARG_EXPERT_SYNC_PERIOD"));
+    add_opt(common_arg(
+        {"--expert-hyst"}, "F",
+        "expert hot store hysteresis ratio (default: 1.3, 0 = off)",
+        [](common_params & params, const std::string & value) {
+            params.expert_hyst = std::stof(value);
+        }
+    ).set_env("LLAMA_ARG_EXPERT_HYST"));
+    add_opt(common_arg(
+        {"--expert-dwell"}, "N",
+        "expert hot store minimum dwell updates before swap (default: 0 = off)",
+        [](common_params & params, int value) {
+            params.expert_dwell = value;
+        }
+    ).set_env("LLAMA_ARG_EXPERT_DWELL"));
+    add_opt(common_arg(
+        {"-ehs", "--expert-hot-s"}, "N",
+        "-1 = autofit slots from free VRAM, 0 = disabled, N = manual top-N slots",
+        [](common_params & params, int value) {
+            params.expert_hot_s = value;
+            llama_expert_preload::set_slots(value);
+        }
+    ).set_env("LLAMA_ARG_EXPERT_HOT_S"));
+    add_opt(common_arg(
+        {"--expert-pin"}, "N",
+        "fraction (percent) of cold experts to keep pinned in RAM via madvise, "
+        "0 = off, -1 = auto (hot store sets 40, else 0)",
+        [](common_params & params, int value) {
+            params.expert_pin_pct = value;
+        }
+    ).set_env("LLAMA_ARG_EXPERT_PIN"));
+    add_opt(common_arg(
+        {"--expert-no-evict"},
+        {},
+        "never evict experts from the hot store (fill-only, no move-back)",
+        [](common_params &, bool value) {
+            llama_expert_preload::set_no_evict(value);
+        }
+    ));
+    add_opt(common_arg(
+        {"--expert-move-mode"}, "N",
+        "expert store mode: 0 = auto, 1 = copy (keep RAM copy), 2 = move "
+        "(free RAM after verified transfer)",
+        [](common_params & params, int value) {
+            params.expert_move_mode = value;
+        }
+    ).set_env("LLAMA_ARG_EXPERT_MOVE_MODE"));
+    add_opt(common_arg(
+        {"--expert-swaps-per-turn"}, "N",
+        "model-wide expert swaps allowed per sync turn (default: 0 = unlimited); "
+        ">0 enables an ultra-low-bandwidth mode with a fixed 32-token turn",
+        [](common_params & params, int value) {
+            params.expert_swaps_per_turn = value;
+        }
+    ).set_env("LLAMA_ARG_EXPERT_SWAPS_PER_TURN"));
+    add_opt(common_arg(
+        {"--expert-sidecar"},
+        {},
+        "load the expert heatmap sidecar (<model>.tier) at start, save it at exit",
+        [](common_params & params, bool value) {
+            params.expert_sidecar = value;
+        }
+    ).set_env("LLAMA_ARG_EXPERT_SIDECAR"));
+    add_opt(common_arg(
+        {"--expert-gpu"}, "N|NAME",
+        "put the expert store on this GPU: index, or a device name like CUDA0 (default: -1 = all GPUs)",
+        [](common_params & params, const std::string & value) {
+            params.expert_gpu = llama_expert_preload::expert_gpu_parse(value);
+        }
+    ).set_env("LLAMA_ARG_EXPERT_GPU"));
+    add_opt(common_arg(
+        {"--expert-hot-split"}, "N0,N1,N2,...",
+        "fraction of the hot expert slots to place on each GPU, comma-separated "
+        "list of proportions following the device order (e.g. 3,1); only used "
+        "when --expert-gpu is -1 (all GPUs)",
+        [](common_params & params, const std::string & value) {
+            // split string by , and /
+            const std::regex regex{ R"([,/]+)" };
+            std::sregex_token_iterator it{ value.begin(), value.end(), regex, -1 };
+            std::vector<std::string> split_arg{ it, {} };
+            if (split_arg.size() >= llama_max_devices()) {
+                throw std::invalid_argument(
+                    string_format("got %zu input configs, but system only has %zu devices", split_arg.size(), llama_max_devices())
+                );
+            }
+            for (size_t i = 0; i < llama_max_devices(); ++i) {
+                if (i < split_arg.size()) {
+                    params.expert_hot_split[i] = std::stof(split_arg[i]);
+                } else {
+                    params.expert_hot_split[i] = 0.0f;
+                }
+            }
+            params.expert_hot_split_set = true;
+        }
+    ).set_env("LLAMA_ARG_EXPERT_HOT_SPLIT"));
+    add_opt(common_arg(
+        {"--expert-cold-s"}, "N",
+        "number of bottom-C (coldest) expert slots to park on the coldstore "
+        "GPU (default: 0 = disabled); requires the hot store to be active",
+        [](common_params & params, int value) {
+            params.expert_cold_s = value;
+        }
+    ).set_env("LLAMA_ARG_EXPERT_COLD_S"));
+    add_opt(common_arg(
+        {"--expert-cold-gpu"}, "NAME",
+        "put the coldstore on this GPU, a device name like CUDA1 (default: "
+        "unset = disabled)",
+        [](common_params & params, const std::string & value) {
+            params.expert_cold_gpu = llama_expert_preload::expert_gpu_parse(value);
+        }
+    ).set_env("LLAMA_ARG_EXPERT_COLD_GPU"));
+    add_opt(common_arg(
+        {"--expert-boot-tokens"}, "N",
+        "fast-start converge window in decode tokens: while inside it the hot "
+        "store re-syncs fast with the dwell gates off; 0 = phase off (default: 512)",
+        [](common_params & params, int value) {
+            params.expert_boot_tokens = value;
+        }
+    ).set_env("LLAMA_ARG_EXPERT_BOOT_TOKENS"));
+    add_opt(common_arg(
+        {"--expert-cold-dwell-min"}, "N",
+        "min cold syncs a coldstore slot keeps before eviction, a floor that "
+        "applies even with --expert-dwell 0 (default: 2)",
+        [](common_params & params, int value) {
+            params.expert_cold_dwell_min = value;
+        }
+    ).set_env("LLAMA_ARG_EXPERT_COLD_DWELL_MIN"));
+    add_opt(common_arg(
+        {"--expert-cold-sync-step"}, "N",
+        "run the coldstore re-sync every Nth hot store re-sync; "
+        "0 = never after the startup batch (default: 4)",
+        [](common_params & params, int value) {
+            params.expert_cold_sync_step = value;
+        }
+    ).set_env("LLAMA_ARG_EXPERT_COLD_SYNC_STEP"));
     GGML_ASSERT(params.n_gpu_layers < 0); // string_format would need to be extended for a default >= 0
     add_opt(common_arg(
         {"-ngl", "--gpu-layers", "--n-gpu-layers"}, "N",
@@ -3394,7 +3240,7 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         [](common_params & params, const std::string & value) {
             params.hf_token = value;
         }
-    ).set_examples({LLAMA_EXAMPLE_COMMON, LLAMA_EXAMPLE_DOWNLOAD, LLAMA_EXAMPLE_TOKENIZE}).set_env("HF_TOKEN").set_sensitive());
+    ).set_examples({LLAMA_EXAMPLE_COMMON, LLAMA_EXAMPLE_DOWNLOAD, LLAMA_EXAMPLE_TOKENIZE}).set_env("HF_TOKEN"));
     add_opt(common_arg(
         {"--mtp"},
         "also download the multi-token prediction (MTP) head, if available (default: unused)",
@@ -3595,23 +3441,6 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         [](common_params & params, const std::string & value) {
             auto p = string_split<int>(value, ',');
             params.n_pl.insert(params.n_pl.end(), p.begin(), p.end());
-        }
-    ).set_examples({LLAMA_EXAMPLE_BENCH}));
-    add_opt(common_arg(
-        {"--batch-layout"}, "{seq-major,round-robin}",
-        "validation-only batched-bench prompt insertion order (default: seq-major)",
-        [](common_params & params, const std::string & value) {
-            if (value != "seq-major" && value != "round-robin") {
-                throw std::invalid_argument("invalid batch layout");
-            }
-            params.batched_bench_batch_layout = value;
-        }
-    ).set_examples({LLAMA_EXAMPLE_BENCH}));
-    add_opt(common_arg(
-        {"--logits-out"}, "FILE",
-        "validation-only batched-bench binary output for every requested logit row",
-        [](common_params & params, const std::string & value) {
-            params.batched_bench_logits_out = value;
         }
     ).set_examples({LLAMA_EXAMPLE_BENCH}));
     add_opt(common_arg(
@@ -3863,10 +3692,6 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
                     LOG_WRN("Setting 'enable_thinking' via --chat-template-kwargs is deprecated. "
                             "Use --reasoning on / --reasoning off instead.\n");
                 }
-                if (item.key() == "preserve_reasoning") {
-                    LOG_WRN("Setting 'preserve_reasoning' via --chat-template-kwargs is deprecated. "
-                            "Use --reasoning-preserve / --no-reasoning-preserve instead.\n");
-                }
                 params.default_template_kwargs[item.key()] = item.value().dump();
             }
         }
@@ -4055,59 +3880,9 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         }
     ).set_examples({LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_COMPLETION, LLAMA_EXAMPLE_CLI}).set_env("LLAMA_ARG_THINK_BUDGET_MESSAGE"));
     add_opt(common_arg(
-        {"--reasoning-loop-guard"}, "MODE",
-        string_format("reasoning loop guard mode: off, force-close, or stop (default: %s)",
-            common_reasoning_loop_guard_mode_name(params.reasoning_loop_guard.mode)),
-        [](common_params & params, const std::string & value) {
-            params.reasoning_loop_guard.mode = common_reasoning_loop_guard_mode_from_name(value);
-        }
-    ).set_examples({LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_COMPLETION, LLAMA_EXAMPLE_CLI}).set_env("LLAMA_ARG_REASONING_LOOP_GUARD"));
-    add_opt(common_arg(
-        {"--reasoning-loop-min-tokens"}, "N",
-        string_format("minimum hidden reasoning tokens before loop checks (default: %d)", params.reasoning_loop_guard.min_reasoning_tokens),
-        [](common_params & params, int value) {
-            params.reasoning_loop_guard.min_reasoning_tokens = value;
-        }
-    ).set_examples({LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_COMPLETION, LLAMA_EXAMPLE_CLI}).set_env("LLAMA_ARG_REASONING_LOOP_MIN_TOKENS"));
-    add_opt(common_arg(
-        {"--reasoning-loop-window"}, "N",
-        string_format("token tail window for reasoning loop checks (default: %d)", params.reasoning_loop_guard.window_tokens),
-        [](common_params & params, int value) {
-            params.reasoning_loop_guard.window_tokens = value;
-        }
-    ).set_examples({LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_COMPLETION, LLAMA_EXAMPLE_CLI}).set_env("LLAMA_ARG_REASONING_LOOP_WINDOW"));
-    add_opt(common_arg(
-        {"--reasoning-loop-max-period"}, "N",
-        string_format("maximum periodic loop length to check (default: %d)", params.reasoning_loop_guard.max_period),
-        [](common_params & params, int value) {
-            params.reasoning_loop_guard.max_period = value;
-        }
-    ).set_examples({LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_COMPLETION, LLAMA_EXAMPLE_CLI}).set_env("LLAMA_ARG_REASONING_LOOP_MAX_PERIOD"));
-    add_opt(common_arg(
-        {"--reasoning-loop-min-coverage"}, "N",
-        string_format("minimum repeated token coverage before loop trigger (default: %d)", params.reasoning_loop_guard.min_repeated_coverage),
-        [](common_params & params, int value) {
-            params.reasoning_loop_guard.min_repeated_coverage = value;
-        }
-    ).set_examples({LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_COMPLETION, LLAMA_EXAMPLE_CLI}).set_env("LLAMA_ARG_REASONING_LOOP_MIN_COVERAGE"));
-    add_opt(common_arg(
-        {"--reasoning-loop-check-interval"}, "N",
-        string_format("accepted-token interval between loop checks (default: %d)", params.reasoning_loop_guard.check_interval),
-        [](common_params & params, int value) {
-            params.reasoning_loop_guard.check_interval = value;
-        }
-    ).set_examples({LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_COMPLETION, LLAMA_EXAMPLE_CLI}).set_env("LLAMA_ARG_REASONING_LOOP_CHECK_INTERVAL"));
-    add_opt(common_arg(
-        {"--reasoning-loop-interventions"}, "N",
-        string_format("maximum force-close interventions before stop (default: %d)", params.reasoning_loop_guard.interventions_max),
-        [](common_params & params, int value) {
-            params.reasoning_loop_guard.interventions_max = value;
-        }
-    ).set_examples({LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_COMPLETION, LLAMA_EXAMPLE_CLI}).set_env("LLAMA_ARG_REASONING_LOOP_INTERVENTIONS"));
-    add_opt(common_arg(
         {"--reasoning-preserve"},
         {"--no-reasoning-preserve"},
-        "preserve reasoning trace in the full history, not just the last assistant message (default: enabled)\n"
+        "preserve reasoning trace in the full history, not just the last assistant message (default: template default)\n"
         "compatible with certain templates having 'supports_preserve_reasoning' capability\n"
         "example: https://docs.z.ai/guides/capabilities/thinking-mode#preserved-thinking",
         [](common_params & params, bool value) {
@@ -4116,7 +3891,6 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
             } else {
                 params.default_template_kwargs["preserve_reasoning"] = "false";
             }
-            params.preserve_reasoning_specified = true;
         }
     ).set_examples({LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_COMPLETION, LLAMA_EXAMPLE_CLI}).set_env("LLAMA_ARG_REASONING_PRESERVE"));
     add_opt(common_arg(
@@ -4257,14 +4031,6 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         }
     ).set_env("LLAMA_ARG_LOG_FILE"));
     add_opt(common_arg(
-        {"--log-jsonl"},
-        {"--no-log-jsonl"},
-        "Log as JSONL (one JSON object per line) to stdout, this also disables colored logging (default: disabled)",
-        [](common_params &, bool value) {
-            common_log_set_jsonl(common_log_main(), value);
-        }
-    ).set_env("LLAMA_ARG_LOG_JSONL"));
-    add_opt(common_arg(
         {"--log-prompts-dir"}, "PATH",
         "Log prompts to directory (auto-created if not present; only used for debugging, default: disabled)",
         [](common_params & params, const std::string & value) {
@@ -4340,6 +4106,14 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         }
     ).set_env("LLAMA_ARG_LOG_TIMESTAMPS"));
 
+    add_opt(common_arg(
+        {"--log-jsonl"},
+        {"--no-log-jsonl"},
+        "Log as JSONL (one JSON object per line) to stdout, this also disables colored logging (default: disabled)",
+        [](common_params & params, bool value) {
+            common_log_set_jsonl(common_log_main(), value);
+        }
+    ).set_env("LLAMA_ARG_LOG_JSONL"));
     //
     // speculative parameters
     //
@@ -4460,102 +4234,13 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         }
     ).set_spec().set_examples({LLAMA_EXAMPLE_SPECULATIVE, LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_CLI}));
     add_opt(common_arg(
-        {"--spec-dm-controller"}, "MODE",
-        string_format("adaptive DFlash draft-max controller: off or profit (default: %s)",
-            common_speculative_dm_controller_name(params.speculative.dm_controller)),
-        [](common_params & params, const std::string & value) {
-            params.speculative.dm_controller = common_speculative_dm_controller_from_name(value);
-        }
-    ).set_spec().set_examples({LLAMA_EXAMPLE_SERVER}).set_env("LLAMA_ARG_SPEC_DM_CONTROLLER"));
-    add_opt(common_arg(
-        {"--spec-dm-profit-min"}, "F",
-        string_format("minimum profit margin over the no-spec baseline before disabling dwell clears (default: %.4f)",
-            (double) params.speculative.dm_profit_min),
-        [](common_params & params, const std::string & value) {
-            const float f = std::stof(value);
-            if (f < 0.0f || f > 0.50f) {
-                throw std::invalid_argument("spec-dm-profit-min must be in [0.0, 0.50]");
-            }
-            params.speculative.dm_profit_min = f;
-        }
-    ).set_spec().set_examples({LLAMA_EXAMPLE_SERVER}).set_env("LLAMA_ARG_SPEC_DM_PROFIT_MIN"));
-    add_opt(common_arg(
-        {"--spec-dm-profit-raise-margin"}, "F",
-        string_format("relative profit margin required to raise adaptive draft depth (default: %.4f)",
-            (double) params.speculative.dm_profit_raise_margin),
-        [](common_params & params, const std::string & value) {
-            const float f = std::stof(value);
-            if (f < 0.0f || f > 1.0f) {
-                throw std::invalid_argument("spec-dm-profit-raise-margin must be in [0.0, 1.0]");
-            }
-            params.speculative.dm_profit_raise_margin = f;
-        }
-    ).set_spec().set_examples({LLAMA_EXAMPLE_SERVER}).set_env("LLAMA_ARG_SPEC_DM_PROFIT_RAISE_MARGIN"));
-    add_opt(common_arg(
-        {"--spec-dm-profit-lower-margin"}, "F",
-        string_format("relative profit margin required to lower adaptive draft depth (default: %.4f)",
-            (double) params.speculative.dm_profit_lower_margin),
-        [](common_params & params, const std::string & value) {
-            const float f = std::stof(value);
-            if (f < 0.0f || f > 1.0f) {
-                throw std::invalid_argument("spec-dm-profit-lower-margin must be in [0.0, 1.0]");
-            }
-            params.speculative.dm_profit_lower_margin = f;
-        }
-    ).set_spec().set_examples({LLAMA_EXAMPLE_SERVER}).set_env("LLAMA_ARG_SPEC_DM_PROFIT_LOWER_MARGIN"));
-    add_opt(common_arg(
-        {"--spec-dm-profit-ewma-alpha"}, "F",
-        string_format("EWMA alpha for adaptive draft-max profit statistics (default: %.4f)",
-            (double) params.speculative.dm_profit_ewma_alpha),
-        [](common_params & params, const std::string & value) {
-            const float f = std::stof(value);
-            if (f < 0.01f || f > 1.0f) {
-                throw std::invalid_argument("spec-dm-profit-ewma-alpha must be in [0.01, 1.0]");
-            }
-            params.speculative.dm_profit_ewma_alpha = f;
-        }
-    ).set_spec().set_examples({LLAMA_EXAMPLE_SERVER}).set_env("LLAMA_ARG_SPEC_DM_PROFIT_EWMA_ALPHA"));
-    add_opt(common_arg(
-        {"--spec-dm-profit-min-samples"}, "N",
-        string_format("minimum samples before adaptive draft-max profit stats are ready (default: %d)",
-            params.speculative.dm_profit_min_samples),
-        [](common_params & params, int value) {
-            if (value < 1 || value > 64) {
-                throw std::invalid_argument("spec-dm-profit-min-samples must be in [1, 64]");
-            }
-            params.speculative.dm_profit_min_samples = value;
-        }
-    ).set_spec().set_examples({LLAMA_EXAMPLE_SERVER}).set_env("LLAMA_ARG_SPEC_DM_PROFIT_MIN_SAMPLES"));
-    add_opt(common_arg(
-        {"--spec-dm-profit-warmup"}, "N",
-        string_format("measured samples for each initial positive-depth profit probe (default: %d, 0 = min samples)",
-            params.speculative.dm_profit_warmup),
-        [](common_params & params, int value) {
-            if (value < 0 || value > 64) {
-                throw std::invalid_argument("spec-dm-profit-warmup must be in [0, 64]");
-            }
-            params.speculative.dm_profit_warmup = value;
-        }
-    ).set_spec().set_examples({LLAMA_EXAMPLE_SERVER}).set_env("LLAMA_ARG_SPEC_DM_PROFIT_WARMUP"));
-    add_opt(common_arg(
-        {"--spec-dm-profit-baseline-interval"}, "N",
-        string_format("active profit-controller cycles between no-spec baseline probes (default: %d, 0 = disabled)",
-            params.speculative.dm_profit_baseline_interval),
-        [](common_params & params, int value) {
-            if (value < 0 || value > 4096) {
-                throw std::invalid_argument("spec-dm-profit-baseline-interval must be in [0, 4096]");
-            }
-            params.speculative.dm_profit_baseline_interval = value;
-        }
-    ).set_spec().set_examples({LLAMA_EXAMPLE_SERVER}).set_env("LLAMA_ARG_SPEC_DM_PROFIT_BASELINE_INTERVAL"));
-    add_opt(common_arg(
         {"--spec-draft-type-k", "-ctkd", "--cache-type-k-draft"}, "TYPE",
         string_format(
             "KV cache data type for K for the draft model\n"
             "allowed values: %s\n"
             "(default: %s)",
             get_all_kv_cache_types().c_str(),
-            kv_cache_type_name(params.speculative.draft.cache_type_k)
+            ggml_type_name(params.speculative.draft.cache_type_k)
         ),
         [](common_params & params, const std::string & value) {
             params.speculative.draft.cache_type_k = kv_cache_type_from_str(value);
@@ -4568,7 +4253,7 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
             "allowed values: %s\n"
             "(default: %s)",
             get_all_kv_cache_types().c_str(),
-            kv_cache_type_name(params.speculative.draft.cache_type_v)
+            ggml_type_name(params.speculative.draft.cache_type_v)
         ),
         [](common_params & params, const std::string & value) {
             params.speculative.draft.cache_type_v = kv_cache_type_from_str(value);
@@ -4594,7 +4279,11 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
             if (value < 0) {
                 throw std::invalid_argument("invalid value");
             }
-            llm_add_n_cpu_ffn_overrides(value, LLM_FFN_EXPS_REGEX, params.speculative.draft.tensor_buft_overrides);
+            for (int i = 0; i < value; ++i) {
+                static std::list<std::string> buft_overrides_draft;
+                buft_overrides_draft.push_back(llm_ffn_exps_block_regex(i));
+                params.speculative.draft.tensor_buft_overrides.push_back({buft_overrides_draft.back().c_str(), ggml_backend_cpu_buffer_type()});
+            }
         }
     ).set_spec().set_examples({LLAMA_EXAMPLE_SPECULATIVE, LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_CLI}).set_env("LLAMA_ARG_SPEC_DRAFT_N_CPU_MOE"));
 
@@ -4606,7 +4295,6 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
                 throw std::invalid_argument("invalid value");
             }
             params.speculative.draft.n_max = value;
-            params.speculative.draft_n_max_explicit = true;
         }
     ).set_spec().set_examples({LLAMA_EXAMPLE_SPECULATIVE, LLAMA_EXAMPLE_LOOKUP, LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_CLI}).set_env("LLAMA_ARG_SPEC_DRAFT_N_MAX"));
     add_opt(common_arg(
@@ -4616,38 +4304,6 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
             params.speculative.draft.n_min = value;
         }
     ).set_spec().set_examples({LLAMA_EXAMPLE_SPECULATIVE, LLAMA_EXAMPLE_LOOKUP, LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_CLI}).set_env("LLAMA_ARG_SPEC_DRAFT_N_MIN"));
-    add_opt(common_arg(
-        {"--spec-synth-len"}, "L",
-        "target mean synthetic acceptance length, including the target token (benchmarking only)",
-        [](common_params & params, const std::string & value) {
-            const std::string text = string_strip(value);
-            size_t pos = 0;
-            const double length = std::stod(text, &pos);
-            if (pos != text.size() || length == -1.0) {
-                throw std::invalid_argument("invalid value");
-            }
-            params.speculative.synth_len = length;
-        }
-    ).set_spec().set_examples({LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_CLI}).set_env("LLAMA_ARG_SPEC_SYNTH_LEN"));
-    add_opt(common_arg(
-        {"--spec-synth-rates"}, "P0,P1,...",
-        "comma-separated unconditional per-position synthetic acceptance probabilities (benchmarking only)",
-        [](common_params & params, const std::string & value) {
-            const auto values = string_split<std::string>(value, ',');
-            std::vector<double> rates;
-            rates.reserve(values.size());
-            for (const auto & raw : values) {
-                const std::string text = string_strip(raw);
-                size_t pos = 0;
-                const double rate = std::stod(text, &pos);
-                if (pos != text.size()) {
-                    throw std::invalid_argument("invalid value");
-                }
-                rates.push_back(rate);
-            }
-            params.speculative.synth_rates = std::move(rates);
-        }
-    ).set_spec().set_examples({LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_CLI}).set_env("LLAMA_ARG_SPEC_SYNTH_RATES"));
 
     add_opt(common_arg(
         {"--spec-draft-p-split", "--draft-p-split"}, "P",
@@ -4713,14 +4369,7 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         string_format("comma-separated list of types of speculative decoding to use (default: %s)\n",
             common_speculative_type_name_str(params.speculative.types).c_str()),
         [](common_params & params, const std::string & value) {
-            auto types_str = string_split<std::string>(value, ',');
-            for (const auto & type : types_str) {
-                if (type == "copyspec" || type == "suffix" || type == "recycle") {
-                    throw std::invalid_argument(string_format(
-                        "speculative type '%s' was removed in v0.4.0; use draft-dflash or upstream's ngram modes",
-                        type.c_str()));
-                }
-            }
+            const auto types_str = string_split<std::string>(value, ',');
             auto types = common_speculative_types_from_names(types_str);
             params.speculative.types.insert(params.speculative.types.end(), types.begin(), types.end());
         }

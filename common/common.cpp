@@ -25,7 +25,6 @@
 #include <iterator>
 #include <regex>
 #include <sstream>
-#include <stdexcept>
 #include <string>
 #include <thread>
 #include <unordered_set>
@@ -64,58 +63,6 @@
 #if defined(_MSC_VER)
 #pragma warning(disable: 4244 4267) // possible loss of data
 #endif
-
-common_reasoning_loop_guard_mode common_reasoning_loop_guard_mode_from_name(const std::string & value) {
-    if (value == "off") {
-        return COMMON_REASONING_LOOP_GUARD_OFF;
-    }
-    if (value == "force-close") {
-        return COMMON_REASONING_LOOP_GUARD_FORCE_CLOSE;
-    }
-    if (value == "stop") {
-        return COMMON_REASONING_LOOP_GUARD_STOP;
-    }
-    throw std::invalid_argument("invalid reasoning-loop-guard, expected one of: off, force-close, stop");
-}
-
-const char * common_reasoning_loop_guard_mode_name(common_reasoning_loop_guard_mode value) {
-    switch (value) {
-        case COMMON_REASONING_LOOP_GUARD_OFF:         return "off";
-        case COMMON_REASONING_LOOP_GUARD_FORCE_CLOSE: return "force-close";
-        case COMMON_REASONING_LOOP_GUARD_STOP:        return "stop";
-    }
-    return "unknown";
-}
-
-void common_validate_reasoning_loop_guard_params(const common_reasoning_loop_guard_params & params) {
-    if (params.min_reasoning_tokens < 0) {
-        throw std::invalid_argument("reasoning-loop-min-tokens must be >= 0");
-    }
-    if (params.window_tokens <= 0) {
-        throw std::invalid_argument("reasoning-loop-window must be > 0");
-    }
-    if (params.max_period <= 0) {
-        throw std::invalid_argument("reasoning-loop-max-period must be > 0");
-    }
-    if (params.min_repeated_coverage <= 0) {
-        throw std::invalid_argument("reasoning-loop-min-coverage must be > 0");
-    }
-    if (params.check_interval <= 0) {
-        throw std::invalid_argument("reasoning-loop-check-interval must be > 0");
-    }
-    if (params.interventions_max < 0) {
-        throw std::invalid_argument("reasoning-loop-interventions must be >= 0");
-    }
-    if (params.window_tokens < params.min_repeated_coverage) {
-        throw std::invalid_argument("reasoning-loop-window must be >= reasoning-loop-min-coverage");
-    }
-    if (params.max_period > params.window_tokens / 3) {
-        throw std::invalid_argument("reasoning-loop-max-period must be <= reasoning-loop-window / 3");
-    }
-    if (params.min_reasoning_tokens < params.min_repeated_coverage) {
-        throw std::invalid_argument("reasoning-loop-min-tokens must be >= reasoning-loop-min-coverage");
-    }
-}
 
 common_time_meas::common_time_meas(int64_t & t_acc, bool disable) : t_start_us(disable ? -1 : ggml_time_us()), t_acc(t_acc) {}
 
@@ -488,50 +435,6 @@ std::string common_params_get_system_info(const common_params & params) {
 #endif
 
     return os.str();
-}
-
-bool common_speculative_resolve_dflash_draft_n_max(
-        common_params_speculative & params,
-        const std::string & draft_model_path) {
-    const bool has_dflash = std::find(
-            params.types.begin(), params.types.end(),
-            COMMON_SPECULATIVE_TYPE_DRAFT_DFLASH) != params.types.end();
-    if (!has_dflash || params.draft_n_max_explicit) {
-        return true;
-    }
-
-    struct gguf_init_params gguf_params = {
-        /* .no_alloc = */ true,
-        /* .ctx      = */ nullptr,
-    };
-    gguf_context * ctx = gguf_init_from_file(draft_model_path.c_str(), gguf_params);
-    if (ctx == nullptr) {
-        COM_ERR("DFlash: failed to read draft model metadata from '%s'\n", draft_model_path.c_str());
-        return false;
-    }
-
-    int32_t block_size = 16; // matches the upstream DFlash fallback
-    const int64_t key = gguf_find_key(ctx, "dflash.block_size");
-    if (key >= 0) {
-        if (gguf_get_kv_type(ctx, key) != GGUF_TYPE_UINT32) {
-            COM_ERR("%s", "DFlash: metadata key dflash.block_size must be uint32\n");
-            gguf_free(ctx);
-            return false;
-        }
-        const uint32_t value = gguf_get_val_u32(ctx, key);
-        if (value == 0 || value > INT32_MAX) {
-            COM_ERR("DFlash: invalid dflash.block_size value: %" PRIu32 "\n", value);
-            gguf_free(ctx);
-            return false;
-        }
-        block_size = (int32_t) value;
-    }
-    gguf_free(ctx);
-
-    params.draft.n_max = block_size - 1;
-    COM_INF("DFlash: omitted --spec-draft-n-max defaults to the drafter block depth (%d); pass the flag to override\n",
-            params.draft.n_max);
-    return true;
 }
 
 //
@@ -1388,25 +1291,13 @@ struct common_init_result::impl {
 common_init_result::common_init_result(common_params & params, bool model_only) :
     pimpl(new impl{}) {
     auto mparams = common_model_params_to_llama(params);
-    const bool bee_tail_request = params.kvarn.type != LLAMA_KVARN_TYPE_DISABLED ||
-            params.kv_tail_tokens != "0";
-    std::unique_ptr<llama_kv_tail_request, decltype(&llama_kv_tail_request_free)> tail_request(
-            bee_tail_request ? llama_kv_tail_request_init(
-                    params.kv_tail_tokens.c_str(), params.kv_tail_type) : nullptr,
-            llama_kv_tail_request_free);
-    if (tail_request && llama_kv_tail_request_last_error(tail_request.get())[0] != '\0') {
-        COM_ERR("invalid KV tail request: %s\n", llama_kv_tail_request_last_error(tail_request.get()));
-        return;
-    }
     auto cparams = common_context_params_to_llama(params);
-    if (tail_request) {
-        cparams.kv_tail_tokens = 0;
-        cparams.kv_tail_request = tail_request.get();
-    }
 
     if (params.fit_params) {
         COM_TRC("%s", "fitting params to device memory ...\n");
         COM_TRC("%s", "(for bugs during this step try to reproduce them with -fit off, or provide --verbose logs if the bug only occurs with -fit on)\n");
+        int n_expert_hot_s = params.expert_hot_s;
+        int * p_expert_hot_s = params.expert_hot_s == -1 ? &n_expert_hot_s : nullptr;
 
         // the draft context is created from the same base params and follows the main context, fit both together
         const bool has_draft = params.speculative.has_dft();
@@ -1429,13 +1320,56 @@ common_init_result::common_init_result(common_params & params, bool model_only) 
             /*.shares_model =*/ !has_draft, // an MTP context runs on the weights of the main model
         };
 
-        common_fit_params(params.model.path.c_str(), &mparams, &cparams,
+        const common_params_fit_status fit_status = common_fit_params(params.model.path.c_str(), &mparams, &cparams,
             params.tensor_split,
             params.tensor_buft_overrides.data(),
             params.fit_params_target.data(),
             params.fit_params_min_ctx,
             has_draft || spec_mtp ? &extra : nullptr,
-            params.verbosity >= LOG_LEVEL_DEBUG ? GGML_LOG_LEVEL_DEBUG : GGML_LOG_LEVEL_ERROR);
+            params.verbosity >= LOG_LEVEL_DEBUG ? GGML_LOG_LEVEL_DEBUG : GGML_LOG_LEVEL_ERROR,
+            p_expert_hot_s);
+        if (params.expert_hot_s == -1) {
+            // -1 = autofit slots from what the fit leaves on GPU; send all experts
+            // to CPU so the hot store copy reads host pointers (<=> -cmoe).
+            params.expert_hot_s = n_expert_hot_s > 0 ? n_expert_hot_s : 0;
+            cparams.expert_hot_s = params.expert_hot_s;
+            // compute capability gate (sm_61 regresses; see RFC #25857)
+            const int min_cc = llama_expert_preload::gpu_min_cc(params.expert_gpu);
+            if (params.expert_hot_s > 0 && !getenv("LLAMA_EXPERT_FORCE") &&
+                min_cc > 0 && min_cc < llama_expert_preload::EXPERT_MIN_CC) {
+                LOG_WRN("%s: GPU compute capability %d.%d too old for the expert cache (need sm_70+); expert cache is OFF\n",
+                    __func__, min_cc / 100, (min_cc / 10) % 10);
+                params.expert_hot_s = 0;
+                cparams.expert_hot_s = params.expert_hot_s;
+            }
+            if (params.expert_hot_s > 0) {
+                for (auto & o : params.tensor_buft_overrides) {
+                    if (o.pattern == nullptr) {
+                        o.buft    = ggml_backend_cpu_buffer_type();
+                        o.pattern = LLM_FFN_EXPS_REGEX;
+                        break;
+                    }
+                }
+            } else if (fit_status == COMMON_PARAMS_FIT_STATUS_FAILURE) {
+                LOG_WRN("%s: --expert-hot-s -1 autofit aborted (explicit -ngl/-ncmoe or fit error); expert cache is OFF\n",
+                    __func__);
+            } else {
+                LOG_WRN("%s: --expert-hot-s -1 autofit found no free VRAM for expert slots; expert cache is OFF\n",
+                    __func__);
+            }
+        }
+    } else if (params.expert_hot_s == -1) {
+        // autofit only runs inside --fit; without it -1 is meaningless
+        params.expert_hot_s = 0;
+        cparams.expert_hot_s = params.expert_hot_s;
+        LOG_WRN("%s: --expert-hot-s -1 requires --fit (disabled by -fit off or explicit -ngl/-ncmoe); expert cache is OFF\n",
+            __func__);
+    }
+
+    // --expert-pin -1 auto: 40 with the hot store, 0 without
+    if (params.expert_pin_pct == -1) {
+        params.expert_pin_pct = params.expert_hot_s != 0 ? 40 : 0;
+        cparams.expert_pin_pct = params.expert_pin_pct;
     }
 
     llama_model * model = llama_model_load_from_file(params.model.path.c_str(), mparams);
@@ -1698,29 +1632,40 @@ common_context_seq_rm_type common_context_can_seq_rm(llama_context * ctx) {
         return COMMON_CONTEXT_SEQ_RM_TYPE_NO;
     }
 
-    const auto capability = llama_memory_get_seq_rm_capability(mem);
-    if (capability.arbitrary_ranges) {
-        COM_TRC("%s", "the context supports arbitrary sequence removal\n");
-        return COMMON_CONTEXT_SEQ_RM_TYPE_PART;
-    }
-    if (capability.suffix_rollback_tokens > 0) {
-        COM_TRC("%s", "the context supports bounded partial sequence removal\n");
-        return COMMON_CONTEXT_SEQ_RM_TYPE_RS;
-    }
-    if (capability.full_clear) {
-        COM_TRC("%s", "the context supports complete sequence removal only\n");
-        return COMMON_CONTEXT_SEQ_RM_TYPE_FULL;
-    }
-    return COMMON_CONTEXT_SEQ_RM_TYPE_NO;
-}
+    common_context_seq_rm_type res = COMMON_CONTEXT_SEQ_RM_TYPE_PART;
 
-uint32_t common_context_seq_rm_max_rollback(llama_context * ctx) {
-    auto * mem = llama_get_memory(ctx);
-    if (!mem) {
-        return 0;
+    llama_memory_clear(mem, true);
+
+    // eval 2 tokens to check if the context is compatible
+    std::vector<llama_token> tmp;
+    tmp.push_back(0);
+    tmp.push_back(0);
+
+    int ret = llama_decode(ctx, llama_batch_get_one(tmp.data(), tmp.size()));
+    if (ret != 0) {
+        COM_ERR("llama_decode() failed: %d\n", ret);
+        res = COMMON_CONTEXT_SEQ_RM_TYPE_NO;
+        goto done;
     }
-    const auto capability = llama_memory_get_seq_rm_capability(mem);
-    return capability.arbitrary_ranges ? UINT32_MAX : capability.suffix_rollback_tokens;
+
+    if (llama_n_rs_seq(ctx) > 0) {
+        COM_TRC("%s", "the context supports bounded partial sequence removal\n");
+        res = COMMON_CONTEXT_SEQ_RM_TYPE_RS;
+        goto done;
+    }
+
+    // try to remove the last tokens
+    if (!llama_memory_seq_rm(mem, 0, 1, -1)) {
+        COM_TRC("%s", "the context does not support partial sequence removal\n");
+        res = COMMON_CONTEXT_SEQ_RM_TYPE_FULL;
+        goto done;
+    }
+
+done:
+    llama_memory_clear(mem, true);
+    llama_synchronize(ctx);
+
+    return res;
 }
 
 static void common_context_seq_rm(llama_context * ctx, llama_seq_id seq_id, llama_pos p0, llama_pos p1) {
@@ -1750,85 +1695,6 @@ void common_memory::seq_rm(llama_seq_id seq_id, llama_pos p0, llama_pos p1) cons
     if (ctx_dft) {
         common_context_seq_rm(ctx_dft, seq_id, p0, p1);
     }
-}
-
-common_memory_seq_rm_result common_memory_seq_rm_suffix(
-        llama_seq_id seq_id,
-        llama_pos requested_p0,
-        const common_memory_seq_rm_io & io,
-        const std::function<llama_pos(llama_pos)> & normalize_p0,
-        llama_pos & planned_p0) {
-    const auto clear_complete_sequences = [&]() {
-        const bool clear_target = io.remove(COMMON_MEMORY_CONTEXT_TARGET, seq_id, -1, -1);
-        const bool clear_draft = !io.has_draft ||
-                io.remove(COMMON_MEMORY_CONTEXT_DRAFT, seq_id, -1, -1);
-        if (!clear_target || !clear_draft) {
-            GGML_ABORT("sequence-removal recovery failed to clear a complete slot sequence");
-        }
-        planned_p0 = 0;
-    };
-
-    llama_pos target_p0 = requested_p0;
-    llama_pos target_p1 = -1;
-    llama_pos draft_p0 = requested_p0;
-    llama_pos draft_p1 = -1;
-    const bool target_planned = io.plan(
-            COMMON_MEMORY_CONTEXT_TARGET, seq_id, requested_p0, -1, target_p0, target_p1);
-    const bool draft_planned = !io.has_draft || io.plan(
-            COMMON_MEMORY_CONTEXT_DRAFT, seq_id, requested_p0, -1, draft_p0, draft_p1);
-    if (!target_planned || !draft_planned || target_p1 >= 0 || (io.has_draft && draft_p1 >= 0)) {
-        clear_complete_sequences();
-        return COMMON_MEMORY_SEQ_RM_FULL_REPROCESS;
-    }
-
-    planned_p0 = io.has_draft ? std::min(target_p0, draft_p0) : target_p0;
-    planned_p0 = normalize_p0(planned_p0);
-    const bool target_accepts = io.can_remove(
-            COMMON_MEMORY_CONTEXT_TARGET, seq_id, planned_p0, -1);
-    const bool draft_accepts = !io.has_draft || io.can_remove(
-            COMMON_MEMORY_CONTEXT_DRAFT, seq_id, planned_p0, -1);
-    if (!target_accepts || !draft_accepts) {
-        clear_complete_sequences();
-        return COMMON_MEMORY_SEQ_RM_FULL_REPROCESS;
-    }
-
-    const bool target_removed = io.remove(
-            COMMON_MEMORY_CONTEXT_TARGET, seq_id, planned_p0, -1);
-    const bool draft_removed = target_removed && (!io.has_draft || io.remove(
-            COMMON_MEMORY_CONTEXT_DRAFT, seq_id, planned_p0, -1));
-    if (!target_removed || !draft_removed) {
-        clear_complete_sequences();
-        return COMMON_MEMORY_SEQ_RM_MUTATION_FAILED;
-    }
-
-    return COMMON_MEMORY_SEQ_RM_APPLIED;
-}
-
-common_memory_seq_rm_result common_memory::seq_rm_suffix(
-        llama_seq_id seq_id,
-        llama_pos requested_p0,
-        const std::function<llama_pos(llama_pos)> & normalize_p0,
-        llama_pos & planned_p0) const {
-    common_memory_seq_rm_io io {
-        /*.has_draft =*/ ctx_dft != nullptr,
-        /*.plan =*/ [&](common_memory_context_kind kind, llama_seq_id seq_id,
-                        llama_pos p0, llama_pos p1, llama_pos & plan_p0, llama_pos & plan_p1) {
-            llama_context * ctx = kind == COMMON_MEMORY_CONTEXT_TARGET ? ctx_tgt : ctx_dft;
-            return ctx != nullptr && llama_memory_seq_rm_plan(
-                    llama_get_memory(ctx), seq_id, p0, p1, &plan_p0, &plan_p1);
-        },
-        /*.can_remove =*/ [&](common_memory_context_kind kind, llama_seq_id seq_id,
-                              llama_pos p0, llama_pos p1) {
-            llama_context * ctx = kind == COMMON_MEMORY_CONTEXT_TARGET ? ctx_tgt : ctx_dft;
-            return ctx != nullptr && llama_memory_can_seq_rm(llama_get_memory(ctx), seq_id, p0, p1);
-        },
-        /*.remove =*/ [&](common_memory_context_kind kind, llama_seq_id seq_id,
-                          llama_pos p0, llama_pos p1) {
-            llama_context * ctx = kind == COMMON_MEMORY_CONTEXT_TARGET ? ctx_tgt : ctx_dft;
-            return ctx != nullptr && llama_memory_seq_rm(llama_get_memory(ctx), seq_id, p0, p1);
-        },
-    };
-    return common_memory_seq_rm_suffix(seq_id, requested_p0, io, normalize_p0, planned_p0);
 }
 
 void common_memory::seq_cp(llama_seq_id seq_id_src, llama_seq_id seq_id_dst, llama_pos p0, llama_pos p1) const {
@@ -1868,7 +1734,6 @@ struct llama_model_params common_model_params_to_llama(common_params & params) {
     mparams.main_gpu        = params.main_gpu;
     mparams.split_mode      = params.split_mode;
     mparams.load_mode       = params.load_mode;
-    mparams.lazy_mode = params.lazy_mode;
     mparams.tensor_split    = params.tensor_split;
     mparams.check_tensors   = params.check_tensors;
     mparams.use_extra_bufts = !params.no_extra_bufts;
@@ -1931,10 +1796,6 @@ struct llama_context_params common_context_params_to_llama(const common_params &
 
     cparams.type_k = params.cache_type_k;
     cparams.type_v = params.cache_type_v;
-    cparams.kvarn  = params.kvarn;
-    cparams.kv_tail_tokens = params.kv_tail_tokens.find_first_of(",=") == std::string::npos &&
-            params.kv_tail_tokens != "auto" ? std::stoul(params.kv_tail_tokens) : 0;
-    cparams.kv_tail_type = params.kv_tail_type;
 
     cparams.expert_heat_decay      = params.expert_heat_decay;
     cparams.expert_heat_log_period = params.expert_heat_log_period;
@@ -2484,100 +2345,76 @@ void common_prompt_checkpoint::update_pos(
     this->pos_max  = pos_max;
 }
 
-common_prompt_checkpoint_result common_prompt_checkpoint::update_tgt(
+void common_prompt_checkpoint::update_tgt(
         llama_context * ctx,
         llama_seq_id seq_id,
         llama_state_seq_flags flags) {
-    data_tgt.clear();
     if (ctx == nullptr) {
-        return { COMMON_PROMPT_CHECKPOINT_INVALID_CONTEXT, 0 };
+        return;
     }
 
     const size_t ckpt_size = llama_state_seq_get_size_ext(ctx, seq_id, flags);
-    if (ckpt_size == 0) {
-        return { COMMON_PROMPT_CHECKPOINT_UNSUPPORTED, 0 };
-    }
 
-    try {
-        data_tgt.resize(ckpt_size);
-    } catch (const std::bad_alloc &) {
-        data_tgt.clear();
-        return { COMMON_PROMPT_CHECKPOINT_ALLOCATION_FAILED, 0 };
-    }
+    data_tgt.resize(ckpt_size);
 
     const size_t n = llama_state_seq_get_data_ext(ctx, data_tgt.data(), ckpt_size, seq_id, flags);
     if (n != ckpt_size) {
-        data_tgt.clear();
-        return { COMMON_PROMPT_CHECKPOINT_SIZE_MISMATCH, n };
+        GGML_ABORT("checkpoint size mismatch: expected %zu, got %zu\n", ckpt_size, n);
     }
-    return { COMMON_PROMPT_CHECKPOINT_SUCCESS, n };
 }
 
-common_prompt_checkpoint_result common_prompt_checkpoint::update_dft(
+void common_prompt_checkpoint::update_dft(
         llama_context * ctx,
         llama_seq_id seq_id,
         llama_state_seq_flags flags) {
-    data_dft.clear();
     if (ctx == nullptr) {
-        return { COMMON_PROMPT_CHECKPOINT_SKIPPED, 0 };
+        return;
     }
 
     const size_t ckpt_size = llama_state_seq_get_size_ext(ctx, seq_id, flags);
-    if (ckpt_size == 0) {
-        return { COMMON_PROMPT_CHECKPOINT_UNSUPPORTED, 0 };
-    }
 
-    try {
-        data_dft.resize(ckpt_size);
-    } catch (const std::bad_alloc &) {
-        data_dft.clear();
-        return { COMMON_PROMPT_CHECKPOINT_ALLOCATION_FAILED, 0 };
-    }
+    data_dft.resize(ckpt_size);
 
     const size_t n = llama_state_seq_get_data_ext(ctx, data_dft.data(), ckpt_size, seq_id, flags);
     if (n != ckpt_size) {
-        data_dft.clear();
-        return { COMMON_PROMPT_CHECKPOINT_SIZE_MISMATCH, n };
+        GGML_ABORT("checkpoint size mismatch: expected %zu, got %zu\n", ckpt_size, n);
     }
-    return { COMMON_PROMPT_CHECKPOINT_SUCCESS, n };
 }
 
-common_prompt_checkpoint_result common_prompt_checkpoint::load_tgt(
+void common_prompt_checkpoint::load_tgt(
         llama_context * ctx,
         llama_seq_id seq_id,
         llama_state_seq_flags flags) const {
     if (ctx == nullptr) {
-        return { COMMON_PROMPT_CHECKPOINT_INVALID_CONTEXT, 0 };
+        return;
     }
 
     if (data_tgt.empty()) {
-        return { COMMON_PROMPT_CHECKPOINT_UNSUPPORTED, 0 };
+        return;
     }
 
     const size_t n = llama_state_seq_set_data_ext(ctx, data_tgt.data(), data_tgt.size(), seq_id, flags);
     if (n != data_tgt.size()) {
-        return { COMMON_PROMPT_CHECKPOINT_SIZE_MISMATCH, n };
+        GGML_ABORT("checkpoint size mismatch: expected %zu, got %zu\n", data_tgt.size(), n);
     }
-    return { COMMON_PROMPT_CHECKPOINT_SUCCESS, n };
 }
 
-common_prompt_checkpoint_result common_prompt_checkpoint::load_dft(
+void common_prompt_checkpoint::load_dft(
         llama_context * ctx,
         llama_seq_id seq_id,
         llama_state_seq_flags flags) const {
     if (ctx == nullptr) {
-        return { COMMON_PROMPT_CHECKPOINT_SKIPPED, 0 };
+        return;
     }
 
     if (data_dft.empty()) {
-        return { COMMON_PROMPT_CHECKPOINT_UNSUPPORTED, 0 };
+        return;
     }
 
     const size_t n = llama_state_seq_set_data_ext(ctx, data_dft.data(), data_dft.size(), seq_id, flags);
     if (n != data_dft.size()) {
-        return { COMMON_PROMPT_CHECKPOINT_SIZE_MISMATCH, n };
+        GGML_ABORT("checkpoint size mismatch: expected %zu, got %zu\n", data_dft.size(), n);
     }
-    return { COMMON_PROMPT_CHECKPOINT_SUCCESS, n };
 }
 
 void common_prompt_checkpoint::clear_tgt() {

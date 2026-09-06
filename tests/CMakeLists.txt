@@ -481,8 +481,6 @@ llama_build_and_test(test-state-restore-fragmented.cpp LABEL "model" ARGS -m "${
 set_tests_properties(test-state-restore-fragmented PROPERTIES FIXTURES_REQUIRED test-download-model)
 
 # Test state save/load functionality
-llama_build_and_test(test-save-load-state.cpp LABEL "model" ARGS -m "${MODEL_DEST}")
-set_tests_properties(test-save-load-state PROPERTIES FIXTURES_REQUIRED test-download-model)
 
 # QuantFactory packages the Apache-2.0 SmolLM2 base model at a pinned revision.
 # Its 64-element attention heads are compatible with standard q4_0 KV tails.

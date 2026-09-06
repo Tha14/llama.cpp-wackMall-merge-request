@@ -41,7 +41,7 @@ configure_file(${TEMPLATE_FILE} ${OUTPUT_FILE})
 set(TARGET llama-common-base)
 add_library(${TARGET} STATIC ${OUTPUT_FILE})
 
-target_include_directories(${TARGET} PUBLIC . ${CMAKE_CURRENT_SOURCE_DIR}/../ggml/include)
+target_include_directories(${TARGET} PUBLIC . ../src ../include)
 target_compile_features   (${TARGET} PRIVATE cxx_std_17)
 
 if (BUILD_SHARED_LIBS)

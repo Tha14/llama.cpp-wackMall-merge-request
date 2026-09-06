@@ -8,7 +8,6 @@
 #include "ggml.h"
 #include "llama.h"
 
-#include <list>
 #include <set>
 #include <sstream>
 #include <string>
@@ -17,7 +16,6 @@
 #include <map>
 #include <algorithm>
 #include <fstream>
-#include <functional>
 
 #if defined(_WIN32) && !defined(_WIN32_WINNT)
 #define _WIN32_WINNT 0x0A00
@@ -271,7 +269,7 @@ struct common_params_sampling {
         COMMON_SAMPLER_TYPE_TEMPERATURE,
     };
 
-    common_grammar                      grammar;          // optional grammar constraint (user / output-format / tool-calls)
+    common_grammar              grammar;      // optional grammar constraint (user / output-format / tool-calls)
     bool                                grammar_lazy = false;
     std::vector<common_grammar_trigger> grammar_triggers; // optional triggers (for lazy grammars)
     std::set<llama_token>               preserved_tokens;
@@ -292,7 +290,6 @@ struct common_params_sampling {
     std::vector<llama_tokens> reasoning_budget_end;            // end tag token sequences; the first tag is used as the forcing sequence
     std::vector<llama_token>  reasoning_budget_forced;         // forced sequence (message + first end tag)
     std::string               reasoning_budget_message;        // message injected before end tag when budget exhausted
-    bool                      reasoning_budget_tracking = false; // track reasoning state even with an unlimited budget
     bool                      reasoning_control = false;       // create the budget sampler on demand so reasoning can be ended at runtime
 
     bool backend_sampling = false;
@@ -369,19 +366,8 @@ struct common_params_speculative_ngram_cache {
     std::string lookup_cache_dynamic; // path of dynamic ngram cache file for lookup decoding
 };
 
-// BeeLlama's adaptive draft-max controller is intentionally independent of
-// the speculative implementation.  Upstream remains authoritative for all
-// draft modes; the controller only chooses the next DFlash draft horizon.
-enum common_speculative_dm_controller {
-    COMMON_SPECULATIVE_DM_CONTROLLER_OFF,
-    COMMON_SPECULATIVE_DM_CONTROLLER_PROFIT,
-};
-
 struct common_params_speculative {
     std::vector<enum common_speculative_type> types = { COMMON_SPECULATIVE_TYPE_NONE };
-
-    double synth_len = -1.0;
-    std::vector<double> synth_rates;
 
     // used by Simple, MTP, Eagle3, etc. - all methods that require some kind of draft model
     common_params_speculative_draft draft;
@@ -393,25 +379,8 @@ struct common_params_speculative {
 
     common_params_speculative_ngram_cache ngram_cache;
 
-    // Adaptive DFlash draft horizon.  "profit" is the only retained Bee
-    // controller; the old fringe controller was coupled to the retired fork
-    // verifier and is intentionally not part of the v0.4.0 API.
-    bool draft_n_max_explicit = false;
-    common_speculative_dm_controller dm_controller = COMMON_SPECULATIVE_DM_CONTROLLER_PROFIT;
-    float   dm_profit_min               = 0.05f;
-    float   dm_profit_raise_margin      = 0.05f;
-    float   dm_profit_lower_margin      = 0.05f;
-    float   dm_profit_ewma_alpha        = 0.15f;
-    int32_t dm_profit_min_samples       = 3;
-    int32_t dm_profit_warmup            = 0;
-    int32_t dm_profit_baseline_interval = 1024;
-
     bool has_dft() const {
         return !draft.mparams.empty();
-    }
-
-    bool has_synth() const {
-        return synth_len != -1.0 || !synth_rates.empty();
     }
 
     uint32_t need_n_rs_seq() const {
@@ -423,11 +392,6 @@ struct common_params_speculative {
     }
 };
 
-// Resolve Bee's omitted DFlash draft maximum before target-context allocation.
-// Returns false when the draft GGUF metadata cannot be read or is invalid.
-bool common_speculative_resolve_dflash_draft_n_max(
-        common_params_speculative & params,
-        const std::string & draft_model_path);
 struct common_params_diffusion {
     int32_t steps         = 128;
     bool    visual_mode   = false;
@@ -453,26 +417,6 @@ enum common_reasoning_format {
     // in most cases, use COMMON_REASONING_FORMAT_AUTO
     // see: https://github.com/ggml-org/llama.cpp/pull/15408
 };
-
-enum common_reasoning_loop_guard_mode {
-    COMMON_REASONING_LOOP_GUARD_OFF,
-    COMMON_REASONING_LOOP_GUARD_FORCE_CLOSE,
-    COMMON_REASONING_LOOP_GUARD_STOP,
-};
-
-struct common_reasoning_loop_guard_params {
-    common_reasoning_loop_guard_mode mode = COMMON_REASONING_LOOP_GUARD_FORCE_CLOSE;
-    int32_t min_reasoning_tokens = 512;
-    int32_t window_tokens = 1024;
-    int32_t max_period = 128;
-    int32_t min_repeated_coverage = 256;
-    int32_t check_interval = 64;
-    int32_t interventions_max = 2;
-};
-
-common_reasoning_loop_guard_mode common_reasoning_loop_guard_mode_from_name(const std::string & value);
-const char * common_reasoning_loop_guard_mode_name(common_reasoning_loop_guard_mode value);
-void common_validate_reasoning_loop_guard_params(const common_reasoning_loop_guard_params & params);
 
 
 struct lr_opt {
@@ -530,8 +474,6 @@ struct common_params {
 
     enum llama_split_mode split_mode = LLAMA_SPLIT_MODE_LAYER; // how to split the model across GPUs
     enum llama_load_mode  load_mode  = LLAMA_LOAD_MODE_AUTO; // how to load the model
-
-    enum llama_lazy_mode lazy_mode = LLAMA_LAZY_MODE_AUTO; // on-demand reading of tensors marked by the arch
 
     common_cpu_params cpuparams;
     common_cpu_params cpuparams_batch;
@@ -654,29 +596,6 @@ struct common_params {
     ggml_type cache_type_k = GGML_TYPE_F16; // KV cache data type for the K
     ggml_type cache_type_v = GGML_TYPE_F16; // KV cache data type for the V
 
-    // Kept unresolved until the target model's canonical cache groups are known.
-    std::string kv_tail_tokens = "0";
-    ggml_type   kv_tail_type   = GGML_TYPE_COUNT;
-
-    // KVarN is selected by its pseudo cache-type names in the argument parser.
-    // The backing ggml types remain the matching standard q formats for layers
-    // that are not eligible for structured KVarN storage.
-    int32_t cache_kvarn_bits_k = 0;
-    int32_t cache_kvarn_bits_v = 0;
-    int32_t cache_kvarn_swa_bits_k = 0;
-    int32_t cache_kvarn_swa_bits_v = 0;
-    llama_kvarn_params kvarn = {
-        /*.type                =*/ LLAMA_KVARN_TYPE_DISABLED,
-        /*.key_bits            =*/ 0,
-        /*.value_bits          =*/ 0,
-        /*.swa_key_bits        =*/ 0,
-        /*.swa_value_bits      =*/ 0,
-        /*.group               =*/ 128,
-        /*.sinkhorn_iters      =*/ 16,
-        /*.sink_tokens         =*/ 128,
-        /*.fail_if_unsupported =*/ true,
-    };
-
     common_conversation_mode conversation_mode = COMMON_CONVERSATION_MODE_AUTO;
 
     // multimodal models (see tools/mtmd)
@@ -688,11 +607,6 @@ struct common_params {
     int image_min_tokens = -1;
     int image_max_tokens = -1;
     int mtmd_batch_max_tokens = 1024;
-
-    // for video input
-    float       video_fps                   = 4.0f;
-    int64_t     video_timestamp_interval_ms = 5000;
-    std::string video_ffmpeg_bin_dir        = "";
 
     // finetune
     struct lr_opt lr;
@@ -717,7 +631,6 @@ struct common_params {
     bool    cache_prompt        = true;  // whether to enable prompt caching
     bool    cache_idle_slots    = true;  // save and clear idle slots upon starting a new task
     int32_t n_ctx_checkpoints   = 32;    // max number of context checkpoints per slot
-    int32_t kv_unified_per_slot = 0;     // max context per parallel slot; 0 = unset
     int32_t checkpoint_min_step = 8192;  // minimum spacing between context checkpoints
     int32_t cache_ram_mib       = 8192;  // -1 = no limit, 0 - disable, 1 = 1 MiB, etc.
 
@@ -738,7 +651,6 @@ struct common_params {
     bool force_pure_content_parser = false;
     common_reasoning_format reasoning_format = COMMON_REASONING_FORMAT_DEEPSEEK;
     int enable_reasoning = -1; // -1 = auto, 0 = disable, 1 = enable
-    common_reasoning_loop_guard_params reasoning_loop_guard;
     bool prefill_assistant = true; // if true, any trailing assistant message will be prefilled into the response
     int sleep_idle_seconds = -1;   // if >0, server will sleep after this many seconds of idle time
 
@@ -748,7 +660,6 @@ struct common_params {
     std::string ssl_file_cert = "";                                                                         // NOLINT
 
     std::map<std::string, std::string> default_template_kwargs;
-    bool preserve_reasoning_specified = false;
 
     // CLI params
     std::string server_base; // if set, connect to this server instead of starting a new one
@@ -792,8 +703,6 @@ struct common_params {
     std::vector<int32_t> n_pp;
     std::vector<int32_t> n_tg;
     std::vector<int32_t> n_pl;
-    std::string batched_bench_batch_layout = "seq-major";
-    std::string batched_bench_logits_out;
 
     // retrieval params
     std::vector<std::string> context_files; // context files to embed
@@ -1085,38 +994,9 @@ enum common_context_seq_rm_type {
     COMMON_CONTEXT_SEQ_RM_TYPE_RS = 3, // can seq_rm partial sequences, bounded by n_rs_seq
 };
 
-// Read-only memory capability query for recurrent/speculative setup.
+// check if the llama_context can remove sequences
+// note: clears the memory of the context
 common_context_seq_rm_type common_context_can_seq_rm(llama_context * ctx);
-uint32_t common_context_seq_rm_max_rollback(llama_context * ctx);
-
-enum common_memory_context_kind {
-    COMMON_MEMORY_CONTEXT_TARGET,
-    COMMON_MEMORY_CONTEXT_DRAFT,
-};
-
-enum common_memory_seq_rm_result {
-    COMMON_MEMORY_SEQ_RM_APPLIED,
-    COMMON_MEMORY_SEQ_RM_FULL_REPROCESS,
-    COMMON_MEMORY_SEQ_RM_MUTATION_FAILED,
-};
-
-// Injectable memory operations used by the transactional suffix-removal helper.
-// The concrete common_memory overload below supplies these from llama_context;
-// the explicit form keeps failure recovery independently testable.
-struct common_memory_seq_rm_io {
-    bool has_draft;
-    std::function<bool(common_memory_context_kind, llama_seq_id, llama_pos, llama_pos,
-                       llama_pos &, llama_pos &)> plan;
-    std::function<bool(common_memory_context_kind, llama_seq_id, llama_pos, llama_pos)> can_remove;
-    std::function<bool(common_memory_context_kind, llama_seq_id, llama_pos, llama_pos)> remove;
-};
-
-common_memory_seq_rm_result common_memory_seq_rm_suffix(
-        llama_seq_id seq_id,
-        llama_pos requested_p0,
-        const common_memory_seq_rm_io & io,
-        const std::function<llama_pos(llama_pos)> & normalize_p0,
-        llama_pos & planned_p0);
 
 struct common_memory {
     llama_context * ctx_tgt = nullptr;
@@ -1128,12 +1008,6 @@ struct common_memory {
     void seq_rm (llama_seq_id seq_id, llama_pos p0, llama_pos p1) const;
     void seq_add(llama_seq_id seq_id, llama_pos p0, llama_pos p1, llama_pos delta) const;
     void seq_cp (llama_seq_id seq_id_src, llama_seq_id seq_id_dst, llama_pos p0, llama_pos p1) const;
-
-    common_memory_seq_rm_result seq_rm_suffix(
-            llama_seq_id seq_id,
-            llama_pos requested_p0,
-            const std::function<llama_pos(llama_pos)> & normalize_p0,
-            llama_pos & planned_p0) const;
 };
 
 //
@@ -1253,28 +1127,17 @@ const char * const LLM_KV_SPLIT_TENSORS_COUNT = "split.tensors.count";
 }
 
 //
-// FFN offload utils
+// MoE utils
 //
 
 const char * const LLM_FFN_EXPS_REGEX = "\\.ffn_(up|down|gate|gate_up)_(ch|)exps";
 
-const char * const LLM_FFN_DENSE_REGEX = "\\.ffn_(up|down|gate)\\.";
-
-inline std::string llm_ffn_block_regex(int idx, const char * ffn_regex) {
-    return string_format("blk\\.%d%s", idx, ffn_regex);
+inline std::string llm_ffn_exps_block_regex(int idx) {
+    return string_format("blk\\.%d%s", idx, LLM_FFN_EXPS_REGEX);
 }
 
 inline llama_model_tensor_buft_override llm_ffn_exps_cpu_override() {
     return { LLM_FFN_EXPS_REGEX, ggml_backend_cpu_buffer_type() };
-}
-
-inline void llm_add_n_cpu_ffn_overrides(int n, const char * ffn_regex, std::vector<llama_model_tensor_buft_override> & overrides) {
-    // keep strings alive and avoid leaking memory by storing them in a static list
-    static std::list<std::string> buft_override_strings;
-    for (int i = 0; i < n; ++i) {
-        buft_override_strings.push_back(llm_ffn_block_regex(i, ffn_regex));
-        overrides.push_back({buft_override_strings.back().c_str(), ggml_backend_cpu_buffer_type()});
-    }
 }
 
 //
@@ -1290,65 +1153,6 @@ enum ggml_opt_optimizer_type common_opt_get_optimizer(const char *);
 // prompt utils
 //
 
-enum common_prompt_checkpoint_status {
-    COMMON_PROMPT_CHECKPOINT_SUCCESS,
-    COMMON_PROMPT_CHECKPOINT_SKIPPED,
-    COMMON_PROMPT_CHECKPOINT_INVALID_CONTEXT,
-    COMMON_PROMPT_CHECKPOINT_UNSUPPORTED,
-    COMMON_PROMPT_CHECKPOINT_SIZE_MISMATCH,
-    COMMON_PROMPT_CHECKPOINT_ALLOCATION_FAILED,
-};
-
-struct common_prompt_checkpoint_result {
-    common_prompt_checkpoint_status status = COMMON_PROMPT_CHECKPOINT_SUCCESS;
-    size_t bytes = 0;
-
-    bool ok() const {
-        return status == COMMON_PROMPT_CHECKPOINT_SUCCESS ||
-                status == COMMON_PROMPT_CHECKPOINT_SKIPPED;
-    }
-};
-
-class common_prompt_checkpoint_buffer {
-public:
-    common_prompt_checkpoint_buffer() : storage(empty_storage()) {}
-
-    size_t size() const { return storage->size(); }
-    bool empty() const { return storage->empty(); }
-    const uint8_t * data() const { return storage->data(); }
-    const void * storage_id() const { return storage.get(); }
-
-    uint8_t * data() {
-        detach();
-        return storage->data();
-    }
-    void resize(size_t size) {
-        detach();
-        storage->resize(size);
-    }
-    void resize(size_t size, uint8_t value) {
-        detach();
-        storage->resize(size, value);
-    }
-    void clear() {
-        storage = empty_storage();
-    }
-
-private:
-    static const std::shared_ptr<std::vector<uint8_t>> & empty_storage() {
-        static const auto empty = std::make_shared<std::vector<uint8_t>>();
-        return empty;
-    }
-
-    void detach() {
-        if (!storage.unique()) {
-            storage = std::make_shared<std::vector<uint8_t>>(*storage);
-        }
-    }
-
-    std::shared_ptr<std::vector<uint8_t>> storage;
-};
-
 struct common_prompt_checkpoint {
     int64_t n_tokens;
 
@@ -1358,8 +1162,8 @@ struct common_prompt_checkpoint {
     llama_pos pos_min;
     llama_pos pos_max;
 
-    common_prompt_checkpoint_buffer data_tgt;
-    common_prompt_checkpoint_buffer data_dft;
+    std::vector<uint8_t> data_tgt;
+    std::vector<uint8_t> data_dft;
 
     // (optional) speculative-decoding implementation state stashed with the checkpoint
     // (e.g. eagle3's deferred-boundary g_embd row)
@@ -1375,22 +1179,22 @@ struct common_prompt_checkpoint {
             llama_pos pos_min,
             llama_pos pos_max);
 
-    common_prompt_checkpoint_result update_tgt(
+    void update_tgt(
             llama_context * ctx,
             llama_seq_id seq_id,
             llama_state_seq_flags flags);
 
-    common_prompt_checkpoint_result update_dft(
+    void update_dft(
             llama_context * ctx,
             llama_seq_id seq_id,
             llama_state_seq_flags flags);
 
-    common_prompt_checkpoint_result load_tgt(
+    void load_tgt(
             llama_context * ctx,
             llama_seq_id seq_id,
             llama_state_seq_flags flags) const;
 
-    common_prompt_checkpoint_result load_dft(
+    void load_dft(
             llama_context * ctx,
             llama_seq_id seq_id,
             llama_state_seq_flags flags) const;

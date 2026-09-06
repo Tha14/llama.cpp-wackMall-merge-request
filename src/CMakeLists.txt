@@ -27,12 +27,8 @@ add_library(llama
             llama-hparams.cpp
             llama-impl.cpp
             llama-io.cpp
-            llama-kvarn.cpp
             llama-kv-cache.cpp
             llama-kv-cache-tail.cpp
-            llama-kv-tail-request.cpp
-            llama-kv-cache-placement.cpp
-            llama-kv-cache-kvarn.cpp
             llama-kv-cache-iswa.cpp
             llama-kv-cache-dsa.cpp
             llama-kv-cache-dsa-iswa.cpp
@@ -41,7 +37,6 @@ add_library(llama
             llama-memory.cpp
             llama-memory-hybrid.cpp
             llama-memory-hybrid-iswa.cpp
-            llama-memory-hybrid-idx.cpp
             llama-memory-recurrent.cpp
             llama-mmap.cpp
             llama-model-loader.cpp
@@ -62,9 +57,12 @@ set_target_properties(llama PROPERTIES
     MACHO_CURRENT_VERSION 0 # keep macOS linker from seeing oversized version number
 )
 
-configure_file(llama-version.h.in ${CMAKE_CURRENT_BINARY_DIR}/llama-version.h @ONLY)
+target_compile_definitions(llama PRIVATE
+    LLAMA_VERSION="${LLAMA_VERSION}"
+    LLAMA_COMMIT="${LLAMA_BUILD_COMMIT}"
+)
 
-target_include_directories(llama PRIVATE . ${CMAKE_CURRENT_BINARY_DIR})
+target_include_directories(llama PRIVATE .)
 target_include_directories(llama PUBLIC ../include)
 target_compile_features   (llama PRIVATE cxx_std_17) # don't bump
 
