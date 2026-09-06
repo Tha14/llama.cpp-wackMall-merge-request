@@ -647,11 +647,6 @@ void ggml_cuda_op_rope_impl(ggml_backend_cuda_context & ctx,
                                                 s03, s1, s2, s3, n_dims, n_offs, nr, pos, freq_scale, freq_base,
                                                 ext_factor, attn_factor, corr_dims, freq_factors, row_indices,
                                                 set_rows_stride, inplace, stream);
-        } else if (src0->type == GGML_TYPE_BF16 && dst_type == GGML_TYPE_BF16) {
-            rope_neox_cuda<forward, nv_bfloat16, nv_bfloat16>((const nv_bfloat16 *) src0_d, (nv_bfloat16 *) dst_d,
-                                                 ne00, ne01, ne02, s01, s02, s03, s1, s2, s3, n_dims, n_offs, nr, pos,
-                                                 freq_scale, freq_base, ext_factor, attn_factor, corr_dims,
-                                                 freq_factors, row_indices, set_rows_stride, inplace, stream);
         } else {
             GGML_ABORT("fatal error");
         }
@@ -662,12 +657,8 @@ void ggml_cuda_op_rope_impl(ggml_backend_cuda_context & ctx,
                                      corr_dims, freq_factors, sections, is_imrope, inplace, stream);
         } else if (src0->type == GGML_TYPE_F16) {
             rope_multi_cuda<forward>((const half *) src0_d, (half *) dst_d, ne00, ne01, ne02, s01, s02, s03, s1,
-                                      s2, s3, n_dims, n_offs, nr, pos, freq_scale, freq_base, ext_factor, attn_factor,
-                                      corr_dims, freq_factors, sections, is_imrope, inplace, stream);
-        } else if (src0->type == GGML_TYPE_BF16) {
-            rope_multi_cuda<forward>((const nv_bfloat16 *) src0_d, (nv_bfloat16 *) dst_d, ne00, ne01, ne02,
-                                     s01, s02, s03, s1, s2, s3, n_dims, n_offs, nr, pos, freq_scale, freq_base,
-                                     ext_factor, attn_factor, corr_dims, freq_factors, sections, is_imrope, inplace, stream);
+                                     s2, s3, n_dims, n_offs, nr, pos, freq_scale, freq_base, ext_factor, attn_factor,
+                                     corr_dims, freq_factors, sections, is_imrope, inplace, stream);
         } else {
             GGML_ABORT("fatal error");
         }
@@ -703,11 +694,6 @@ void ggml_cuda_op_rope_impl(ggml_backend_cuda_context & ctx,
                                                 s03, s1, s2, s3, n_dims, n_offs, nr, pos, freq_scale, freq_base,
                                                 ext_factor, attn_factor, corr_dims, freq_factors, row_indices,
                                                 set_rows_stride, inplace, stream);
-        } else if (src0->type == GGML_TYPE_BF16 && dst_type == GGML_TYPE_BF16) {
-            rope_norm_cuda<forward, nv_bfloat16, nv_bfloat16>((const nv_bfloat16 *) src0_d, (nv_bfloat16 *) dst_d,
-                                                 ne00, ne01, ne02, s01, s02, s03, s1, s2, s3, n_dims, n_offs, nr, pos,
-                                                 freq_scale, freq_base, ext_factor, attn_factor, corr_dims,
-                                                 freq_factors, row_indices, set_rows_stride, inplace, stream);
         } else {
             GGML_ABORT("fatal error");
         }

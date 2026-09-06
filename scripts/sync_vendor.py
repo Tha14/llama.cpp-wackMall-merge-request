@@ -5,7 +5,13 @@ import os
 import sys
 import subprocess
 
-HTTPLIB_VERSION = "refs/tags/v0.53.1"
+HTTPLIB_VERSION = "refs/tags/v0.54.1"
+
+# used by examples/gguf-hash, these repos have no release tag, so we pin a commit
+XXHASH_COMMIT      = "9f465f1ea932d6ad9a26cd77496311ffa544cd68"
+SHA1_COMMIT        = "e1e2536fcf6a8f9703be8c85d58724b408552287"
+SHA256_COMMIT      = "5e637272c13f200872d55ff579f7e2ab6c3f252f"
+ROTATE_BITS_COMMIT = "27e784942f67db44abf2115c6638e735b579acd1"
 
 # used by examples/gguf-hash, these repos have no release tag, so we pin a commit
 XXHASH_COMMIT      = "9f465f1ea932d6ad9a26cd77496311ffa544cd68"

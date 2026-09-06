@@ -1296,8 +1296,6 @@ common_init_result::common_init_result(common_params & params, bool model_only) 
     if (params.fit_params) {
         COM_TRC("%s", "fitting params to device memory ...\n");
         COM_TRC("%s", "(for bugs during this step try to reproduce them with -fit off, or provide --verbose logs if the bug only occurs with -fit on)\n");
-        int n_expert_hot_s = params.expert_hot_s;
-        int * p_expert_hot_s = params.expert_hot_s == -1 ? &n_expert_hot_s : nullptr;
 
         // the draft context is created from the same base params and follows the main context, fit both together
         const bool has_draft = params.speculative.has_dft();
@@ -1320,56 +1318,13 @@ common_init_result::common_init_result(common_params & params, bool model_only) 
             /*.shares_model =*/ !has_draft, // an MTP context runs on the weights of the main model
         };
 
-        const common_params_fit_status fit_status = common_fit_params(params.model.path.c_str(), &mparams, &cparams,
+        common_fit_params(params.model.path.c_str(), &mparams, &cparams,
             params.tensor_split,
             params.tensor_buft_overrides.data(),
             params.fit_params_target.data(),
             params.fit_params_min_ctx,
             has_draft || spec_mtp ? &extra : nullptr,
-            params.verbosity >= LOG_LEVEL_DEBUG ? GGML_LOG_LEVEL_DEBUG : GGML_LOG_LEVEL_ERROR,
-            p_expert_hot_s);
-        if (params.expert_hot_s == -1) {
-            // -1 = autofit slots from what the fit leaves on GPU; send all experts
-            // to CPU so the hot store copy reads host pointers (<=> -cmoe).
-            params.expert_hot_s = n_expert_hot_s > 0 ? n_expert_hot_s : 0;
-            cparams.expert_hot_s = params.expert_hot_s;
-            // compute capability gate (sm_61 regresses; see RFC #25857)
-            const int min_cc = llama_expert_preload::gpu_min_cc(params.expert_gpu);
-            if (params.expert_hot_s > 0 && !getenv("LLAMA_EXPERT_FORCE") &&
-                min_cc > 0 && min_cc < llama_expert_preload::EXPERT_MIN_CC) {
-                LOG_WRN("%s: GPU compute capability %d.%d too old for the expert cache (need sm_70+); expert cache is OFF\n",
-                    __func__, min_cc / 100, (min_cc / 10) % 10);
-                params.expert_hot_s = 0;
-                cparams.expert_hot_s = params.expert_hot_s;
-            }
-            if (params.expert_hot_s > 0) {
-                for (auto & o : params.tensor_buft_overrides) {
-                    if (o.pattern == nullptr) {
-                        o.buft    = ggml_backend_cpu_buffer_type();
-                        o.pattern = LLM_FFN_EXPS_REGEX;
-                        break;
-                    }
-                }
-            } else if (fit_status == COMMON_PARAMS_FIT_STATUS_FAILURE) {
-                LOG_WRN("%s: --expert-hot-s -1 autofit aborted (explicit -ngl/-ncmoe or fit error); expert cache is OFF\n",
-                    __func__);
-            } else {
-                LOG_WRN("%s: --expert-hot-s -1 autofit found no free VRAM for expert slots; expert cache is OFF\n",
-                    __func__);
-            }
-        }
-    } else if (params.expert_hot_s == -1) {
-        // autofit only runs inside --fit; without it -1 is meaningless
-        params.expert_hot_s = 0;
-        cparams.expert_hot_s = params.expert_hot_s;
-        LOG_WRN("%s: --expert-hot-s -1 requires --fit (disabled by -fit off or explicit -ngl/-ncmoe); expert cache is OFF\n",
-            __func__);
-    }
-
-    // --expert-pin -1 auto: 40 with the hot store, 0 without
-    if (params.expert_pin_pct == -1) {
-        params.expert_pin_pct = params.expert_hot_s != 0 ? 40 : 0;
-        cparams.expert_pin_pct = params.expert_pin_pct;
+            params.verbosity >= LOG_LEVEL_DEBUG ? GGML_LOG_LEVEL_DEBUG : GGML_LOG_LEVEL_ERROR);
     }
 
     llama_model * model = llama_model_load_from_file(params.model.path.c_str(), mparams);
@@ -1734,6 +1689,7 @@ struct llama_model_params common_model_params_to_llama(common_params & params) {
     mparams.main_gpu        = params.main_gpu;
     mparams.split_mode      = params.split_mode;
     mparams.load_mode       = params.load_mode;
+    mparams.lazy_mode = params.lazy_mode;
     mparams.tensor_split    = params.tensor_split;
     mparams.check_tensors   = params.check_tensors;
     mparams.use_extra_bufts = !params.no_extra_bufts;

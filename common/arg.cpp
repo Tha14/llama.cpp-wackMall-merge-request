@@ -992,6 +992,11 @@ static bool common_params_parse_ex(int argc, char ** argv, common_params_context
         ));
     }
 
+    // if the preserve_reasoning kwarg was not specified explicitly, enable it by default
+    if (!params.default_template_kwargs.count("preserve_reasoning")) {
+        params.default_template_kwargs["preserve_reasoning"] = "true";
+    }
+
     return true;
 }
 
@@ -1675,6 +1680,14 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
             }
         }
     ).set_env("LLAMA_ARG_CTX_SIZE"));
+    add_opt(common_arg(
+        { "--kv-unified-per-slot" }, "N",
+        "context limit per parallel slot (default: unset, behavior unchanged).\n"
+        "when set without -c/--ctx-size, the shared KV pool is sized to n_parallel*N",
+        [](common_params & params, int value) {
+            params.kv_unified_per_slot = value;
+        }
+    ).set_env("LLAMA_ARG_KV_UNIFIED_PER_SLOT").set_examples({ LLAMA_EXAMPLE_SERVER }));
     add_opt(common_arg(
         {"-n", "--predict", "--n-predict"}, "N",
         string_format(
@@ -2676,6 +2689,27 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
             params.mtmd_batch_max_tokens = value;
         }
     ).set_examples({LLAMA_EXAMPLE_SERVER}).set_env("LLAMA_ARG_MTMD_BATCH_MAX_TOKENS"));
+    add_opt(common_arg(
+        {"--video-fps"}, "N",
+        string_format("target video frame rate (default: %.1f)", params.video_fps),
+        [](common_params & params, const std::string & value) {
+            params.video_fps = std::stof(value);
+        }
+    ).set_examples(mmproj_examples).set_env("LLAMA_ARG_VIDEO_FPS"));
+    add_opt(common_arg(
+        {"--video-timestamp-interval"}, "N",
+        string_format("interval in milliseconds between text timestamps (default: %" PRId64 ")", params.video_timestamp_interval_ms),
+        [](common_params & params, int value) {
+            params.video_timestamp_interval_ms = value;
+        }
+    ).set_examples(mmproj_examples).set_env("LLAMA_ARG_VIDEO_TIMESTAMP_INTERVAL"));
+    add_opt(common_arg(
+        {"--video-ffmpeg-dir"}, "DIR",
+        "path to the directory containing ffmpeg and ffprobe (default: search in PATH)",
+        [](common_params & params, const std::string & value) {
+            params.video_ffmpeg_bin_dir = value;
+        }
+    ).set_examples(mmproj_examples).set_env("LLAMA_ARG_VIDEO_FFMPEG_DIR"));
     if (params.is_gen_docs || llama_supports_rpc()) {
         add_opt(common_arg(
             {"--rpc"}, "SERVERS",
@@ -2732,6 +2766,19 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         }
     ).set_env("LLAMA_ARG_LOAD_MODE"));
     add_opt(common_arg(
+        {"-lzm", "--lazy-mode"}, "MODE",
+        "on-demand reading of certain tensors, for example per-layer embeddings (default: auto)\n"
+        "- on: read the rows of such tensors from disk on demand instead of keeping them resident (requires mmap)\n"
+        "- auto: on, but only for tensors larger than 4 GiB\n"
+        "- off: always keep them resident",
+        [](common_params & params, const std::string & value) {
+            /**/ if (value == "on")   { params.lazy_mode = LLAMA_LAZY_MODE_ON;   }
+            else if (value == "auto") { params.lazy_mode = LLAMA_LAZY_MODE_AUTO; }
+            else if (value == "off")  { params.lazy_mode = LLAMA_LAZY_MODE_OFF;  }
+            else { throw std::invalid_argument("invalid value"); }
+        }
+    ).set_env("LLAMA_ARG_LAZY_MODE"));
+    add_opt(common_arg(
         {"--numa"}, "TYPE",
         "attempt optimizations that help on some NUMA systems\n"
         "- distribute: spread execution evenly over all nodes\n"
@@ -2782,169 +2829,20 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
             if (value < 0) {
                 throw std::invalid_argument("invalid value");
             }
-            for (int i = 0; i < value; ++i) {
-                // keep strings alive and avoid leaking memory by storing them in a static vector
-                static std::list<std::string> buft_overrides;
-                buft_overrides.push_back(llm_ffn_exps_block_regex(i));
-                params.tensor_buft_overrides.push_back({buft_overrides.back().c_str(), ggml_backend_cpu_buffer_type()});
-            }
+            llm_add_n_cpu_ffn_overrides(value, LLM_FFN_EXPS_REGEX, params.tensor_buft_overrides);
         }
     ).set_env("LLAMA_ARG_N_CPU_MOE"));
     add_opt(common_arg(
-        {"--expert-heat-decay"}, "F",
-        "expert heatmap decay rate per update (default: 0.999)",
-        [](common_params & params, const std::string & value) {
-            params.expert_heat_decay = std::stof(value);
-        }
-    ).set_env("LLAMA_ARG_EXPERT_HEAT_DECAY"));
-    add_opt(common_arg(
-        {"--expert-heat-log-period"}, "N",
-        "print the expert heatmap at generation end (default: 0, 0 = off)",
+        {"-ncffn", "--n-cpu-ffn"}, "N",
+        "keep the dense FFN weights of the first N layers in the CPU\n"
+        "(dense models; for MoE expert weights use --n-cpu-moe)",
         [](common_params & params, int value) {
-            params.expert_heat_log_period = value;
-        }
-    ).set_env("LLAMA_ARG_EXPERT_HEAT_LOG_PERIOD"));
-    add_opt(common_arg(
-        {"--expert-sync-period"}, "N",
-        "expert hot store re-sync cadence in tokens (default: 1)",
-        [](common_params & params, int value) {
-            params.expert_sync_period = value;
-        }
-    ).set_env("LLAMA_ARG_EXPERT_SYNC_PERIOD"));
-    add_opt(common_arg(
-        {"--expert-hyst"}, "F",
-        "expert hot store hysteresis ratio (default: 1.3, 0 = off)",
-        [](common_params & params, const std::string & value) {
-            params.expert_hyst = std::stof(value);
-        }
-    ).set_env("LLAMA_ARG_EXPERT_HYST"));
-    add_opt(common_arg(
-        {"--expert-dwell"}, "N",
-        "expert hot store minimum dwell updates before swap (default: 0 = off)",
-        [](common_params & params, int value) {
-            params.expert_dwell = value;
-        }
-    ).set_env("LLAMA_ARG_EXPERT_DWELL"));
-    add_opt(common_arg(
-        {"-ehs", "--expert-hot-s"}, "N",
-        "-1 = autofit slots from free VRAM, 0 = disabled, N = manual top-N slots",
-        [](common_params & params, int value) {
-            params.expert_hot_s = value;
-            llama_expert_preload::set_slots(value);
-        }
-    ).set_env("LLAMA_ARG_EXPERT_HOT_S"));
-    add_opt(common_arg(
-        {"--expert-pin"}, "N",
-        "fraction (percent) of cold experts to keep pinned in RAM via madvise, "
-        "0 = off, -1 = auto (hot store sets 40, else 0)",
-        [](common_params & params, int value) {
-            params.expert_pin_pct = value;
-        }
-    ).set_env("LLAMA_ARG_EXPERT_PIN"));
-    add_opt(common_arg(
-        {"--expert-no-evict"},
-        {},
-        "never evict experts from the hot store (fill-only, no move-back)",
-        [](common_params &, bool value) {
-            llama_expert_preload::set_no_evict(value);
-        }
-    ));
-    add_opt(common_arg(
-        {"--expert-move-mode"}, "N",
-        "expert store mode: 0 = auto, 1 = copy (keep RAM copy), 2 = move "
-        "(free RAM after verified transfer)",
-        [](common_params & params, int value) {
-            params.expert_move_mode = value;
-        }
-    ).set_env("LLAMA_ARG_EXPERT_MOVE_MODE"));
-    add_opt(common_arg(
-        {"--expert-swaps-per-turn"}, "N",
-        "model-wide expert swaps allowed per sync turn (default: 0 = unlimited); "
-        ">0 enables an ultra-low-bandwidth mode with a fixed 32-token turn",
-        [](common_params & params, int value) {
-            params.expert_swaps_per_turn = value;
-        }
-    ).set_env("LLAMA_ARG_EXPERT_SWAPS_PER_TURN"));
-    add_opt(common_arg(
-        {"--expert-sidecar"},
-        {},
-        "load the expert heatmap sidecar (<model>.tier) at start, save it at exit",
-        [](common_params & params, bool value) {
-            params.expert_sidecar = value;
-        }
-    ).set_env("LLAMA_ARG_EXPERT_SIDECAR"));
-    add_opt(common_arg(
-        {"--expert-gpu"}, "N|NAME",
-        "put the expert store on this GPU: index, or a device name like CUDA0 (default: -1 = all GPUs)",
-        [](common_params & params, const std::string & value) {
-            params.expert_gpu = llama_expert_preload::expert_gpu_parse(value);
-        }
-    ).set_env("LLAMA_ARG_EXPERT_GPU"));
-    add_opt(common_arg(
-        {"--expert-hot-split"}, "N0,N1,N2,...",
-        "fraction of the hot expert slots to place on each GPU, comma-separated "
-        "list of proportions following the device order (e.g. 3,1); only used "
-        "when --expert-gpu is -1 (all GPUs)",
-        [](common_params & params, const std::string & value) {
-            // split string by , and /
-            const std::regex regex{ R"([,/]+)" };
-            std::sregex_token_iterator it{ value.begin(), value.end(), regex, -1 };
-            std::vector<std::string> split_arg{ it, {} };
-            if (split_arg.size() >= llama_max_devices()) {
-                throw std::invalid_argument(
-                    string_format("got %zu input configs, but system only has %zu devices", split_arg.size(), llama_max_devices())
-                );
+            if (value < 0) {
+                throw std::invalid_argument("invalid value");
             }
-            for (size_t i = 0; i < llama_max_devices(); ++i) {
-                if (i < split_arg.size()) {
-                    params.expert_hot_split[i] = std::stof(split_arg[i]);
-                } else {
-                    params.expert_hot_split[i] = 0.0f;
-                }
-            }
-            params.expert_hot_split_set = true;
+            llm_add_n_cpu_ffn_overrides(value, LLM_FFN_DENSE_REGEX, params.tensor_buft_overrides);
         }
-    ).set_env("LLAMA_ARG_EXPERT_HOT_SPLIT"));
-    add_opt(common_arg(
-        {"--expert-cold-s"}, "N",
-        "number of bottom-C (coldest) expert slots to park on the coldstore "
-        "GPU (default: 0 = disabled); requires the hot store to be active",
-        [](common_params & params, int value) {
-            params.expert_cold_s = value;
-        }
-    ).set_env("LLAMA_ARG_EXPERT_COLD_S"));
-    add_opt(common_arg(
-        {"--expert-cold-gpu"}, "NAME",
-        "put the coldstore on this GPU, a device name like CUDA1 (default: "
-        "unset = disabled)",
-        [](common_params & params, const std::string & value) {
-            params.expert_cold_gpu = llama_expert_preload::expert_gpu_parse(value);
-        }
-    ).set_env("LLAMA_ARG_EXPERT_COLD_GPU"));
-    add_opt(common_arg(
-        {"--expert-boot-tokens"}, "N",
-        "fast-start converge window in decode tokens: while inside it the hot "
-        "store re-syncs fast with the dwell gates off; 0 = phase off (default: 512)",
-        [](common_params & params, int value) {
-            params.expert_boot_tokens = value;
-        }
-    ).set_env("LLAMA_ARG_EXPERT_BOOT_TOKENS"));
-    add_opt(common_arg(
-        {"--expert-cold-dwell-min"}, "N",
-        "min cold syncs a coldstore slot keeps before eviction, a floor that "
-        "applies even with --expert-dwell 0 (default: 2)",
-        [](common_params & params, int value) {
-            params.expert_cold_dwell_min = value;
-        }
-    ).set_env("LLAMA_ARG_EXPERT_COLD_DWELL_MIN"));
-    add_opt(common_arg(
-        {"--expert-cold-sync-step"}, "N",
-        "run the coldstore re-sync every Nth hot store re-sync; "
-        "0 = never after the startup batch (default: 4)",
-        [](common_params & params, int value) {
-            params.expert_cold_sync_step = value;
-        }
-    ).set_env("LLAMA_ARG_EXPERT_COLD_SYNC_STEP"));
+    ).set_env("LLAMA_ARG_N_CPU_FFN"));
     GGML_ASSERT(params.n_gpu_layers < 0); // string_format would need to be extended for a default >= 0
     add_opt(common_arg(
         {"-ngl", "--gpu-layers", "--n-gpu-layers"}, "N",
@@ -3692,6 +3590,10 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
                     LOG_WRN("Setting 'enable_thinking' via --chat-template-kwargs is deprecated. "
                             "Use --reasoning on / --reasoning off instead.\n");
                 }
+                if (item.key() == "preserve_reasoning") {
+                    LOG_WRN("Setting 'preserve_reasoning' via --chat-template-kwargs is deprecated. "
+                            "Use --reasoning-preserve / --no-reasoning-preserve instead.\n");
+                }
                 params.default_template_kwargs[item.key()] = item.value().dump();
             }
         }
@@ -3882,7 +3784,7 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
     add_opt(common_arg(
         {"--reasoning-preserve"},
         {"--no-reasoning-preserve"},
-        "preserve reasoning trace in the full history, not just the last assistant message (default: template default)\n"
+        "preserve reasoning trace in the full history, not just the last assistant message (default: enabled)\n"
         "compatible with certain templates having 'supports_preserve_reasoning' capability\n"
         "example: https://docs.z.ai/guides/capabilities/thinking-mode#preserved-thinking",
         [](common_params & params, bool value) {
@@ -3891,6 +3793,7 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
             } else {
                 params.default_template_kwargs["preserve_reasoning"] = "false";
             }
+            params.preserve_reasoning_specified = true;
         }
     ).set_examples({LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_COMPLETION, LLAMA_EXAMPLE_CLI}).set_env("LLAMA_ARG_REASONING_PRESERVE"));
     add_opt(common_arg(
@@ -4030,6 +3933,14 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
             common_log_set_file(common_log_main(), value.c_str());
         }
     ).set_env("LLAMA_ARG_LOG_FILE"));
+    add_opt(common_arg(
+        {"--log-jsonl"},
+        {"--no-log-jsonl"},
+        "Log as JSONL (one JSON object per line) to stdout, this also disables colored logging (default: disabled)",
+        [](common_params &, bool value) {
+            common_log_set_jsonl(common_log_main(), value);
+        }
+    ).set_env("LLAMA_ARG_LOG_JSONL"));
     add_opt(common_arg(
         {"--log-prompts-dir"}, "PATH",
         "Log prompts to directory (auto-created if not present; only used for debugging, default: disabled)",
@@ -4271,11 +4182,7 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
             if (value < 0) {
                 throw std::invalid_argument("invalid value");
             }
-            for (int i = 0; i < value; ++i) {
-                static std::list<std::string> buft_overrides_draft;
-                buft_overrides_draft.push_back(llm_ffn_exps_block_regex(i));
-                params.speculative.draft.tensor_buft_overrides.push_back({buft_overrides_draft.back().c_str(), ggml_backend_cpu_buffer_type()});
-            }
+            llm_add_n_cpu_ffn_overrides(value, LLM_FFN_EXPS_REGEX, params.speculative.draft.tensor_buft_overrides);
         }
     ).set_spec().set_examples({LLAMA_EXAMPLE_SPECULATIVE, LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_CLI}).set_env("LLAMA_ARG_SPEC_DRAFT_N_CPU_MOE"));
 
@@ -4296,6 +4203,38 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
             params.speculative.draft.n_min = value;
         }
     ).set_spec().set_examples({LLAMA_EXAMPLE_SPECULATIVE, LLAMA_EXAMPLE_LOOKUP, LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_CLI}).set_env("LLAMA_ARG_SPEC_DRAFT_N_MIN"));
+    add_opt(common_arg(
+        {"--spec-synth-len"}, "L",
+        "target mean synthetic acceptance length, including the target token (benchmarking only)",
+        [](common_params & params, const std::string & value) {
+            const std::string text = string_strip(value);
+            size_t pos = 0;
+            const double length = std::stod(text, &pos);
+            if (pos != text.size() || length == -1.0) {
+                throw std::invalid_argument("invalid value");
+            }
+            params.speculative.synth_len = length;
+        }
+    ).set_spec().set_examples({LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_CLI}).set_env("LLAMA_ARG_SPEC_SYNTH_LEN"));
+    add_opt(common_arg(
+        {"--spec-synth-rates"}, "P0,P1,...",
+        "comma-separated unconditional per-position synthetic acceptance probabilities (benchmarking only)",
+        [](common_params & params, const std::string & value) {
+            const auto values = string_split<std::string>(value, ',');
+            std::vector<double> rates;
+            rates.reserve(values.size());
+            for (const auto & raw : values) {
+                const std::string text = string_strip(raw);
+                size_t pos = 0;
+                const double rate = std::stod(text, &pos);
+                if (pos != text.size()) {
+                    throw std::invalid_argument("invalid value");
+                }
+                rates.push_back(rate);
+            }
+            params.speculative.synth_rates = std::move(rates);
+        }
+    ).set_spec().set_examples({LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_CLI}).set_env("LLAMA_ARG_SPEC_SYNTH_RATES"));
 
     add_opt(common_arg(
         {"--spec-draft-p-split", "--draft-p-split"}, "P",
