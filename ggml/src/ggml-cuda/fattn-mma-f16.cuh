@@ -985,7 +985,7 @@ static __device__ __forceinline__ void flash_attn_ext_f16_iter(
     if constexpr (cols_per_warp == 8) {
 #pragma unroll
         for (int k = 0; k < nbatch_fa/(np*2*T_B_VKQ::J); ++k) {
-            B[k] = get_transposed(get_half2(KQ_C[k]));
+            B[k] = get_half2(KQ_C[k]);
         }
     } else {
         for (int k = 0; k < nbatch_fa/(np*2*T_B_VKQ::J); ++k) {
@@ -1060,7 +1060,7 @@ static __device__ __forceinline__ void flash_attn_ext_f16_iter(
                     mma(VKQ_C[i_VKQ_0/T_A_VKQ::I], A, B[k00/(np*T_A_VKQ::J)]);
 #else
                     // swap A and B for CUDA.
-                    mma(VKQ_C[i_VKQ_0/T_A_VKQ::I], B[k00/(np*T_A_VKQ::J)], A);
+                    mma(VKQ_C[i_VKQ_0/T_A_VKQ::I], A, B[k00/(np*T_A_VKQ::J)]);
 #endif // defined(AMD_WMMA_AVAILABLE) || defined(AMD_MFMA_AVAILABLE)
                 }
             }
@@ -1107,11 +1107,11 @@ template<int DV, int ncols> struct mma_tile_sizes {
 };
 template<int DV> struct mma_tile_sizes<DV, 8> {
     using T_A_KQ  = tile<16,  8, half2>; // row-major
-    using T_B_KQ  = tile< 8,  8, half2>; // column-major
-    using T_C_KQ  = tile<16,  8, float>; // row-major
+    using T_B_KQ  = tile<16,  8, half2>; // column-major
+    using T_C_KQ  = tile<16, 16, float>; // row-major
     using T_A_VKQ = tile<16,  8, half2>; // row-major
-    using T_B_VKQ = tile< 8,  8, half2>; // column-major
-    using T_C_VKQ = tile<16,  4, half2>; // row-major
+    using T_B_VKQ = tile<16,  8, half2>; // column-major
+    using T_C_VKQ = tile<16,  8, half2>; // row-major
 };
 #elif defined(AMD_WMMA_AVAILABLE)
 #ifdef RDNA3
