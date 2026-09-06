@@ -32,7 +32,7 @@ static inline int ggml_cuda_fattn_kvarn_window_chunk(const int n_kv) {
         std::min(n_kv, GGML_CUDA_FATTN_KVARN_WINDOW_CHUNK);
 }
 
-template <int DKQ, int DV, int ncols1, int ncols2, bool use_logit_softcap>
+template <int DKQ, int DV, int ncols1, int ncols2, bool use_logit_softcap, bool use_sparse>
 static inline fattn_kernel_t ggml_cuda_flash_attn_ext_mma_kvarn_select_kernel(
         bool k_original_domain,
         bool v_original_domain) {
@@ -40,16 +40,16 @@ static inline fattn_kernel_t ggml_cuda_flash_attn_ext_mma_kvarn_select_kernel(
 
     if (k_original_domain) {
         GGML_ASSERT(v_original_domain);
-        return flash_attn_ext_f16<DKQ, DV, ncols1, ncols2, use_logit_softcap, V_is_K_view,
+        return flash_attn_ext_f16<DKQ, DV, ncols1, ncols2, use_logit_softcap, V_is_K_view, use_sparse,
             GGML_CUDA_FATTN_KVARN_ORIGINAL_TYPE, GGML_CUDA_FATTN_KVARN_ORIGINAL_TYPE>;
     }
 
     if (v_original_domain) {
-        return flash_attn_ext_f16<DKQ, DV, ncols1, ncols2, use_logit_softcap, V_is_K_view,
+        return flash_attn_ext_f16<DKQ, DV, ncols1, ncols2, use_logit_softcap, V_is_K_view, use_sparse,
             GGML_CUDA_FATTN_KVARN_TYPE, GGML_CUDA_FATTN_KVARN_ORIGINAL_TYPE>;
     }
 
-    return flash_attn_ext_f16<DKQ, DV, ncols1, ncols2, use_logit_softcap, V_is_K_view,
+    return flash_attn_ext_f16<DKQ, DV, ncols1, ncols2, use_logit_softcap, V_is_K_view, use_sparse,
         GGML_CUDA_FATTN_KVARN_TYPE, GGML_CUDA_FATTN_KVARN_TYPE>;
 }
 
@@ -175,8 +175,9 @@ static __global__ void ggml_cuda_fattn_kvarn_window_f16_partial_kernel(
     constexpr bool V_is_K_view = false;
     constexpr bool needs_fixup = false;
     constexpr bool is_fixup = true;
-    flash_attn_ext_f16_process_tile<DKQ, DV, ncols1, ncols2, nwarps, use_logit_softcap, V_is_K_view, needs_fixup, is_fixup>
-        (Q_f2, K_h2, V_h2, mask_h, sinks_f, dstk, partial_ptr, nullptr, scale, slope, logit_softcap,
+    constexpr bool use_sparse = ggml_cuda_flash_attn_ext_mma_f16_may_use_sparse(DKQ, DV, ncols1, ncols2);
+    flash_attn_ext_f16_process_tile<DKQ, DV, ncols1, ncols2, nwarps, use_logit_softcap, V_is_K_view, use_sparse, needs_fixup, is_fixup>
+        (Q_f2, K_h2, V_h2, mask_h, nullptr, sinks_f, dstk, partial_ptr, nullptr, scale, slope, logit_softcap,
          ne01, ne02, gqa_ratio, ne11, nb01 / (int32_t) sizeof(float2), nb02 / (int32_t) sizeof(float2),
          nb11 / (int32_t) sizeof(half2), nb21 / (int32_t) sizeof(half2), nb31 / (int32_t) sizeof(half),
          jt, zt_gqa, 0, iter_k);
@@ -242,8 +243,9 @@ static __global__ void ggml_cuda_fattn_kvarn_window_f16_direct_kernel(
     constexpr bool V_is_K_view = false;
     constexpr bool needs_fixup = false;
     constexpr bool is_fixup = false;
-    flash_attn_ext_f16_process_tile<DKQ, DV, ncols1, ncols2, nwarps, use_logit_softcap, V_is_K_view, needs_fixup, is_fixup>
-        (Q_f2, K_h2, V_h2, mask_h, sinks_f, dstk, nullptr, nullptr, scale, slope, logit_softcap,
+    constexpr bool use_sparse = ggml_cuda_flash_attn_ext_mma_f16_may_use_sparse(DKQ, DV, ncols1, ncols2);
+    flash_attn_ext_f16_process_tile<DKQ, DV, ncols1, ncols2, nwarps, use_logit_softcap, V_is_K_view, use_sparse, needs_fixup, is_fixup>
+        (Q_f2, K_h2, V_h2, mask_h, nullptr, sinks_f, dstk, partial_ptr, nullptr, scale, slope, logit_softcap,
          ne01, ne02, gqa_ratio, ne11, nb01 / (int32_t) sizeof(float2), nb02 / (int32_t) sizeof(float2),
          nb11 / (int32_t) sizeof(half2), nb21 / (int32_t) sizeof(half2), nb31 / (int32_t) sizeof(half),
          jt, zt_gqa, 0, iter_k);
@@ -535,7 +537,7 @@ static bool ggml_cuda_flash_attn_ext_mma_kvarn_windowed_case_impl(
             v_win.nb[2] = chunk_len * DV * (int64_t) sizeof(half);
             v_win.nb[3] = (int64_t) plan.n_kv_heads * chunk_len * DV * (int64_t) sizeof(half);
 
-            fattn_kernel_t f16_kernel = flash_attn_ext_f16<DKQ, DV, ncols1, ncols2, use_logit_softcap, false>;
+                        fattn_kernel_t f16_kernel = flash_attn_ext_f16<DKQ, DV, ncols1, ncols2, use_logit_softcap, false, ggml_cuda_flash_attn_ext_mma_f16_may_use_sparse(DKQ, DV, ncols1, ncols2), GGML_TYPE_F16, GGML_TYPE_F16>;
 #if !defined(GGML_USE_MUSA)
             CUDA_CHECK(cudaFuncSetAttribute(
                 reinterpret_cast<ggml_cuda_fattn_kernel_attr_ptr_t>(f16_kernel),
@@ -710,9 +712,9 @@ bool ggml_cuda_fattn_kvarn_wide_mma_supported(
     }
 
     fattn_kernel_t fattn_kernel = logit_softcap == 0.0f ?
-        ggml_cuda_flash_attn_ext_mma_kvarn_select_kernel<DKQ, DV, ncols1, ncols2, false>(
+        ggml_cuda_flash_attn_ext_mma_kvarn_select_kernel<DKQ, DV, ncols1, ncols2, false, ggml_cuda_flash_attn_ext_mma_f16_may_use_sparse(DKQ, DV, ncols1, ncols2)>(
             k_original_domain, v_original_domain) :
-        ggml_cuda_flash_attn_ext_mma_kvarn_select_kernel<DKQ, DV, ncols1, ncols2, true>(
+        ggml_cuda_flash_attn_ext_mma_kvarn_select_kernel<DKQ, DV, ncols1, ncols2, true, ggml_cuda_flash_attn_ext_mma_f16_may_use_sparse(DKQ, DV, ncols1, ncols2)>(
             k_original_domain, v_original_domain);
     CUDA_CHECK(cudaFuncSetAttribute(
         reinterpret_cast<ggml_cuda_fattn_kernel_attr_ptr_t>(fattn_kernel),
@@ -804,9 +806,9 @@ void ggml_cuda_flash_attn_ext_mma_kvarn_case(ggml_backend_cuda_context & ctx, gg
     using fattn_kernel_ptr_t = fattn_kernel_t;
 #endif
     fattn_kernel_t fattn_kernel;
-    fattn_kernel_t fattn_kernel_no_softcap = ggml_cuda_flash_attn_ext_mma_kvarn_select_kernel<DKQ, DV, ncols1, ncols2, false>(
+    fattn_kernel_t fattn_kernel_no_softcap = ggml_cuda_flash_attn_ext_mma_kvarn_select_kernel<DKQ, DV, ncols1, ncols2, false, ggml_cuda_flash_attn_ext_mma_f16_may_use_sparse(DKQ, DV, ncols1, ncols2)>(
         k_original_domain, v_original_domain);
-    fattn_kernel_t fattn_kernel_softcap = ggml_cuda_flash_attn_ext_mma_kvarn_select_kernel<DKQ, DV, ncols1, ncols2, true>(
+    fattn_kernel_t fattn_kernel_softcap = ggml_cuda_flash_attn_ext_mma_kvarn_select_kernel<DKQ, DV, ncols1, ncols2, true, ggml_cuda_flash_attn_ext_mma_f16_may_use_sparse(DKQ, DV, ncols1, ncols2)>(
         k_original_domain, v_original_domain);
     if (logit_softcap == 0.0f) {
         fattn_kernel = fattn_kernel_no_softcap;
