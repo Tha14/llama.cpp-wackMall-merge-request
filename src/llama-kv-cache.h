@@ -119,8 +119,13 @@ public:
         const layer_filter_cb & filter,
         const  layer_reuse_cb & reuse,
         const  layer_share_cb & share,
-        // a model can hold more than one cache, so the tensor names have to stay unique
-                 const char *   name_tag = "");
+                 uint32_t   n_ubatch = 0,
+                 uint32_t   tail_tokens = 0,
+                ggml_type   tail_type = GGML_TYPE_F16,
+                 uint32_t   tail_tokens_requested = UINT32_MAX,
+                     bool   tail_metadata_only = false,
+                 uint32_t   tail_rollback_tokens = 0,
+                 uint32_t   tail_visibility_window = 0);
 
     ~llama_kv_cache() = default;
 
@@ -145,9 +150,6 @@ public:
     seq_rm_capability get_seq_rm_capability() const override;
 
     void clear(bool data) override;
-
-// Convert deferred F16 K cache to quantized format (call after prefill)
-    bool convert_deferred_keys();
 
     bool can_seq_rm(llama_seq_id seq_id, llama_pos p0, llama_pos p1) const override;
     bool seq_rm_plan(
@@ -279,15 +281,6 @@ public:
     void set_state_remap_group_size(uint32_t group_size);
     const std::vector<std::pair<uint32_t, uint32_t>> & get_state_cell_remap() const;
 
-    // TurboQuant: get rotation matrices (stored as row-major C arrays)
-    // turbo_rotation = R (forward rotation, for Q pre-rotate-queries)
-    // turbo_rotation_inv = R^T = R^{-1} (inverse rotation, for V output un-rotation)
-    ggml_tensor * get_turbo_rotation() const { return turbo_rotation; }
-    ggml_tensor * get_turbo_rotation_inv() const { return turbo_rotation_inv; }
-
-    // TurboQuant InnerQ: per-channel scale_inv for Q/V equalization
-    ggml_tensor * get_turbo_innerq_scale_inv() const { return turbo_innerq_scale_inv; }
-
     // store k_cur and v_cur in the cache based on the provided head location
     ggml_tensor * cpy_k(ggml_context * ctx, ggml_tensor * k_cur, ggml_tensor * k_idxs, int32_t il, const slot_info & sinfo) const;
     ggml_tensor * cpy_v(ggml_context * ctx, ggml_tensor * v_cur, ggml_tensor * v_idxs, int32_t il, const slot_info & sinfo) const;
@@ -371,17 +364,6 @@ public:
 
     // read-only access to the KV cell metadata for a given stream
     const llama_kv_cells & get_cells(uint32_t stream) const { return v_cells[stream]; }
-
-    // true if llama_kv_cell_ext holds information that has to survive a state save/restore
-    bool has_cell_ext() const;
-
-    // for every token of the ubatch, the ids of the n tokens that precede it in its sequence
-    // example for M-RoPE image case: tokens A B X X X C, where X is a 3-token image at pos 2 spanning positions 2..4:
-    //   tok: A B X X X C
-    //   pos: 0 1 2 2 2 5
-    //   prev, n=2: A -> [NULL, NULL], B -> [NULL, A], 3rd X -> [X, X], C -> [X, X]
-    // note: used by n-gram input embeddings
-    void get_prev_tokens(const llama_ubatch & ubatch, uint32_t n, std::vector<llama_token> & res) const;
 
 private:
     bool seq_rm_unchecked(llama_seq_id seq_id, llama_pos p0, llama_pos p1);
@@ -562,8 +544,37 @@ private:
     void state_write_meta(llama_io_write_i & io, const cell_ranges_t & cr, llama_seq_id seq_id = -1) const;
     void state_write_data(llama_io_write_i & io, const cell_ranges_t & cr) const;
 
-    // sinfo_in, when set, replaces the find_slot call: the cells are given by the caller
-    bool state_read_meta(llama_io_read_i & io, uint32_t strm, uint32_t cell_count,       slot_info & sinfo, llama_seq_id dest_seq_id = -1, const slot_info * sinfo_in = nullptr);
+    void state_write_body(llama_io_write_i & io, llama_seq_id seq_id) const;
+    void state_write_tail(llama_io_write_i & io, llama_seq_id seq_id) const;
+    struct state_v2_manifest;
+    state_v2_manifest state_v2_collect(llama_seq_id seq_id, bool body_only) const;
+    void state_v2_write_manifest(llama_io_write_i & io, const state_v2_manifest & manifest) const;
+    state_v2_manifest state_v2_read_manifest(
+            llama_io_read_i & io,
+            llama_seq_id seq_id,
+            bool body_only,
+            uint32_t version) const;
+    void state_v2_write_body_payload(llama_io_write_i & io, const state_v2_manifest & manifest) const;
+    void state_v2_write_tail_payload(llama_io_write_i & io, const state_v2_manifest & manifest) const;
+    void state_v2_read_payload_and_install(
+            llama_io_read_i & io,
+            llama_seq_id seq_id,
+            llama_state_seq_flags flags,
+            state_v2_manifest & manifest,
+            uint64_t body_payload_size,
+            uint64_t tail_payload_size,
+            uint32_t version);
+    void materialize_pending_copies();
+    std::vector<std::vector<uint32_t>> state_read_body(
+            llama_io_read_i & io, llama_seq_id seq_id, uint32_t n_stream_cur);
+    void state_read_impl(llama_io_read_i & io, llama_seq_id seq_id, llama_state_seq_flags flags);
+    void state_read_tail(
+            llama_io_read_i & io,
+            llama_seq_id seq_id,
+            const std::vector<std::vector<uint32_t>> & restored_cells,
+            llama_state_seq_flags flags);
+
+    bool state_read_meta(llama_io_read_i & io, uint32_t strm, uint32_t cell_count,       slot_info & sinfo, llama_seq_id dest_seq_id = -1);
     bool state_read_data(llama_io_read_i & io, uint32_t strm, uint32_t cell_count, const slot_info & sinfo);
 };
 
@@ -644,17 +655,6 @@ public:
     virtual bool get_tail_explicit_bias(int32_t il) const;
     virtual bool can_pack_tail_body(const llama_ubatch & ubatch) const;
 
-    // TurboQuant rotation accessors
-    ggml_tensor * get_turbo_rotation() const;
-    ggml_tensor * get_turbo_rotation_inv() const;
-
-    // Override virtual methods from llama_memory_context_i
-    ggml_tensor * get_turbo_rot_forward() const override;
-    ggml_tensor * get_turbo_rot_inverse() const override;
-
-    // TurboQuant InnerQ: per-channel scale_inv for Q/V equalization
-    ggml_tensor * get_turbo_innerq_scale_inv() const override;
-
     // store k_cur and v_cur in the cache based on the provided head location
     // note: the heads in k_cur and v_cur should be laid out contiguously in memory
     //   - k_cur  [n_embd_head_k, n_head_k, n_tokens]
@@ -709,9 +709,6 @@ public:
     virtual void set_input_v_rot(ggml_tensor * dst) const;
     virtual void set_input_k_rot_backend(ggml_tensor * dst) const;
     virtual void set_input_v_rot_backend(ggml_tensor * dst) const;
-
-    // see llama_kv_cache::get_prev_tokens()
-    void get_prev_tokens(const llama_ubatch & ubatch, uint32_t n, std::vector<llama_token> & res) const;
 
 private:
     llama_memory_status status;

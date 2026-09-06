@@ -25,11 +25,17 @@ def stop_server_after_each_test():
         server.stop()
 
 
-@pytest.fixture(scope="session", autouse=True)
-def load_server_presets(configure_worker_port, tmp_path_factory):
-    # this will be run once per test session, before any tests
+_server_presets_loaded = False
 
-    # serialize model downloads across parallel workers.
-    root_tmp_dir = tmp_path_factory.getbasetemp().parent
-    with FileLock(str(root_tmp_dir / "load_all.lock")):
+
+@pytest.fixture(scope="module", autouse=True)
+def load_server_presets(request):
+    global _server_presets_loaded
+
+    # Local-model suites validate and provide their own immutable fixture and
+    # must not download or launch the unrelated preset inventory.
+    if getattr(request.module, "NO_PRELOAD_SERVER_PRESETS", False):
+        return
+    if not _server_presets_loaded:
         ServerPreset.load_all()
+        _server_presets_loaded = True

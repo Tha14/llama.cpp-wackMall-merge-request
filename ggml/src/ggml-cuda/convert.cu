@@ -747,12 +747,6 @@ to_fp16_nc_cuda_t ggml_get_to_fp16_nc_cuda(ggml_type type) {
             return dequantize_block_cuda<QK8_0, QR8_0, dequantize_q8_0>;
         case GGML_TYPE_IQ4_NL:
             return dequantize_block_iq4_nl_nc_cuda;
-        case GGML_TYPE_TURBO3_0:
-            return dequantize_block_cuda<QK_TURBO3, QR_TURBO3, dequantize_turbo3_0>;
-        case GGML_TYPE_TURBO2_0:
-            return dequantize_block_cuda<QK_TURBO2, QR_TURBO2, dequantize_turbo2_0>;
-        case GGML_TYPE_TURBO4_0:
-            return dequantize_block_cuda<QK_TURBO4, QR_TURBO4, dequantize_turbo4_0>;
         case GGML_TYPE_BF16:
             return convert_unary_cuda<nv_bfloat16>;
         default:

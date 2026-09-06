@@ -4,9 +4,13 @@
 #include "llama-graph.h"
 #include "llama-kv-memory-stats.h"
 
+#include <algorithm>
+#include <cstdint>
 #include <map>
 #include <memory>
 #include <functional>
+#include <initializer_list>
+#include <vector>
 
 struct llama_ubatch;
 
@@ -24,6 +28,18 @@ struct llama_memory_params {
     bool swa_full;
 
     llama_context_type ctx_type;
+
+    // fork-specific structured KVarN cache; disabled leaves upstream memory selection unchanged
+    llama_kvarn_params kvarn;
+
+    uint32_t  kv_tail_tokens;
+    uint32_t  kv_tail_tokens_swa;
+    uint32_t  kv_tail_tokens_requested;
+    uint32_t  kv_tail_tokens_swa_requested;
+    bool      kv_tail_native_exact;
+    bool      kv_tail_native_exact_swa;
+    uint32_t  kv_tail_rollback_tokens;
+    ggml_type kv_tail_type;
 
     llama_memory_t mem_other;
 };
@@ -66,20 +82,12 @@ struct llama_memory_context_i {
     // get the status of the memory context - used for error handling and checking if any updates would be applied
     virtual llama_memory_status get_status() const = 0;
 
-    // TurboQuant: get rotation tensors for pre-rotate-queries optimization
-    // Returns null for non-turbo memory types. Override in KV cache contexts.
-    virtual ggml_tensor * get_turbo_rot_forward() const { return nullptr; }
-    virtual ggml_tensor * get_turbo_rot_inverse() const { return nullptr; }
-
-    // TurboQuant InnerQ: get per-channel scale_inv tensor for Q/V equalization
-    // Returns nullptr when InnerQ is not active. Override in KV cache contexts.
-    virtual ggml_tensor * get_turbo_innerq_scale_inv() const { return nullptr; }
-
     // Compact cache metadata is prepared by apply(), but is not authoritative
     // until the graph finishes. Wrappers must forward both hooks to their
     // participating child contexts.
     virtual void graph_compute_start() {}
     virtual void graph_compute_finish(ggml_status /* status */) {}
+
 };
 
 using llama_memory_context_ptr = std::unique_ptr<llama_memory_context_i>;
@@ -158,6 +166,7 @@ struct llama_memory_i {
     virtual int cells_at_pos(llama_seq_id seq_id, llama_pos pos, uint32_t * cell_indices, int n_max) = 0;
 
     virtual void seq_cp  (llama_seq_id seq_id_src, llama_seq_id seq_id_dst, llama_pos p0, llama_pos p1) = 0;
+
     virtual void seq_keep(llama_seq_id seq_id) = 0;
     virtual void seq_add (llama_seq_id seq_id,                              llama_pos p0, llama_pos p1, llama_pos shift) = 0;
     virtual void seq_div (llama_seq_id seq_id,                              llama_pos p0, llama_pos p1, int d) = 0;
@@ -166,6 +175,16 @@ struct llama_memory_i {
     virtual llama_pos seq_pos_max(llama_seq_id seq_id) const = 0;
 
     virtual std::map<ggml_backend_buffer_type_t, size_t> memory_breakdown() const = 0;
+    virtual llama_kv_memory_stats kv_memory_stats() const { return {}; }
+    virtual ggml_type get_kv_tail_type() const { return GGML_TYPE_COUNT; }
+
+    virtual uint32_t get_kv_tail_group_count() const { return 0; }
+    virtual bool get_kv_tail_coverage(
+            uint32_t /* group_index */,
+            llama_seq_id /* seq_id */,
+            llama_kv_tail_coverage_info & /* out */) const { return false; }
+    virtual void reset_kv_tail_planner_timing() {}
+    virtual uint64_t get_kv_tail_planner_timing_ns() const { return 0; }
 
     virtual llama_kv_memory_stats kv_memory_stats() const { return {}; }
     virtual ggml_type get_kv_tail_type() const { return GGML_TYPE_COUNT; }
@@ -208,6 +227,8 @@ struct llama_memory_i {
     virtual void state_write(llama_io_write_i & io, llama_seq_id seq_id = -1, llama_state_seq_flags flags = 0) const = 0;
     virtual void state_read (llama_io_read_i  & io, llama_seq_id seq_id = -1, llama_state_seq_flags flags = 0) = 0;
 
+    // KV-cache-compatible hooks used by composite memories such as hybrid and iSWA.
+    // Non-KV memory types keep the defaults and should not be used as attention memory.
     virtual uint32_t get_kv_n_stream() const { return 0; }
     virtual uint32_t get_kv_size() const { return 0; }
     virtual llama_memory_context_ptr init_kv_batch(const std::vector<llama_ubatch> & /* ubatches */) { return nullptr; }

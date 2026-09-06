@@ -1172,7 +1172,6 @@ static const char * GGML_OP_NAME[GGML_OP_COUNT] = {
     "DSV4_HC_COMB",
     "DSV4_HC_PRE",
     "DSV4_HC_POST",
-    "TURBO_WHT",
     "KVARN_WHT",
     "KVARN_STORE",
     "KVARN_VIEW",
@@ -1196,7 +1195,7 @@ static const char * GGML_OP_NAME[GGML_OP_COUNT] = {
     "MOE_COLD",
 };
 
-static_assert(GGML_OP_COUNT == 108, "GGML_OP_COUNT != 108");
+static_assert(GGML_OP_COUNT == 105, "GGML_OP_COUNT != 105");
 
 static const char * GGML_OP_SYMBOL[GGML_OP_COUNT] = {
     "none",
@@ -1294,7 +1293,6 @@ static const char * GGML_OP_SYMBOL[GGML_OP_COUNT] = {
     "dsv4_hc_comb(mixes, scale, base)",
     "dsv4_hc_pre(x, weights)",
     "dsv4_hc_post(x, residual, post, comb)",
-"turbo_wht(a)",
     "kvarn_wht(x)",
     "kvarn_store(current, indices, stage, records)",
     "kvarn_view(records, stage, indices)",
@@ -1318,7 +1316,7 @@ static const char * GGML_OP_SYMBOL[GGML_OP_COUNT] = {
     "moe_cold(x,x,x,x,x,x)",
 };
 
-static_assert(GGML_OP_COUNT == 108, "GGML_OP_COUNT != 108");
+static_assert(GGML_OP_COUNT == 105, "GGML_OP_COUNT != 105");
 
 static_assert(GGML_OP_POOL_COUNT == 2, "GGML_OP_POOL_COUNT != 2");
 
@@ -5811,8 +5809,7 @@ void ggml_flash_attn_ext_set_kv_tail_history_slots(
         struct ggml_tensor * a,
         int32_t              history_slots) {
     GGML_ASSERT(a != NULL && a->op == GGML_OP_FLASH_ATTN_EXT);
-    GGML_ASSERT(a->src[5] != NULL && a->src[6] != NULL && a->src[7] != NULL &&
-                a->src[8] != NULL && a->src[9] != NULL);
+    GGML_ASSERT(a->src[5] != NULL && a->src[6] != NULL && a->src[10] != NULL && a->src[11] != NULL);
     GGML_ASSERT(history_slots > 0 && history_slots <= a->src[5]->ne[1] &&
             history_slots <= a->src[6]->ne[1]);
     ggml_set_op_params_i32(a, GGML_FLASH_ATTN_EXT_OP_PARAM_TAIL_HISTORY_SLOTS, history_slots);
@@ -6850,38 +6847,6 @@ struct ggml_tensor * ggml_dsv4_hc_post(
     result->src[1] = residual;
     result->src[2] = post;
     result->src[3] = comb;
-
-    return result;
-}
-
-// ggml_turbo_wht
-
-struct ggml_tensor * ggml_turbo_wht(
-        struct ggml_context * ctx,
-        struct ggml_tensor  * a,
-        int                   direction,
-        int                   group_size,
-        struct ggml_tensor  * scale) {
-    GGML_ASSERT(ggml_is_contiguous(a));
-    GGML_ASSERT(a->type == GGML_TYPE_F32);
-    GGML_ASSERT(direction == 0 || direction == 1);
-
-    // Auto-detect group size from tensor dimension if not specified
-    if (group_size == 0) {
-        group_size = (a->ne[0] % 128 == 0) ? 128 : 64;
-    }
-    GGML_ASSERT(group_size == 64 || group_size == 128);
-    GGML_ASSERT(a->ne[0] % group_size == 0);
-
-    struct ggml_tensor * result = ggml_new_tensor(ctx, GGML_TYPE_F32, 4, a->ne);
-
-    result->op = GGML_OP_TURBO_WHT;
-    result->src[0] = a;
-    result->src[1] = scale;  // InnerQ scale_inv (NULL = no scaling)
-
-    // Store direction and group_size in op_params
-    memcpy(result->op_params + 0, &direction, sizeof(int));
-    memcpy(result->op_params + sizeof(int), &group_size, sizeof(int));
 
     return result;
 }

@@ -333,22 +333,13 @@ public:
         return seq[i].test(seq_id);
     }
 
-    // the token of the cell of sequence seq_id at the largest position <= p
-    // when several cells share that position, the one with the highest index wins
-    // return LLAMA_TOKEN_NULL if the sequence has no cell at or before p
-    // note: used by n-gram input embeddings to recover the tokens preceding a ubatch
-    llama_token seq_pos_tok_le(llama_seq_id seq_id, llama_pos p) const {
+    // Number of live cache cells that are members of seq_id. Keep this with
+    // seq_pos so coverage queries do not scan the cache.
+    uint32_t seq_size(llama_seq_id seq_id) const {
         assert(seq_id >= 0);
         assert(seq_id < LLAMA_MAX_SEQ);
 
-        const auto & sp = seq_pos[seq_id];
-
-        auto it = sp.upper_bound({ p, std::numeric_limits<uint32_t>::max() });
-        if (it == sp.begin()) {
-            return LLAMA_TOKEN_NULL;
-        }
-
-        return ext[(--it)->second].tok;
+        return seq_used[seq_id];
     }
 
     // note: call only if the cell is not empty and the seq_id is not in the cell
@@ -548,18 +539,26 @@ private:
     //  - during performing a cache reuse via (rm + add)
     //  - some vision models have input embeddings with repeating positions
     //
-    std::set<std::pair<llama_pos, uint32_t>> seq_pos[LLAMA_MAX_SEQ];
+    std::map<llama_pos, int> seq_pos[LLAMA_MAX_SEQ];
+    std::array<uint32_t, LLAMA_MAX_SEQ> seq_used {};
 
     // helper functions for updating `seq_pos`, once cell at a time:
 
-    void seq_pos_dec(llama_seq_id s, uint32_t i) {
-        const auto n = seq_pos[s].erase({ pos[i], i });
-        assert(n == 1);
-        GGML_UNUSED(n);
+    void seq_pos_dec(llama_seq_id s, llama_pos p) {
+        auto it = seq_pos[s].find(p);
+        assert(it != seq_pos[s].end());
+        assert(seq_used[s] > 0);
+
+        --seq_used[s];
+
+        if (--it->second == 0) {
+            seq_pos[s].erase(it);
+        }
     }
 
-    void seq_pos_inc(llama_seq_id s, uint32_t i) {
-        seq_pos[s].insert({ pos[i], i });
+    void seq_pos_inc(llama_seq_id s, llama_pos p) {
+        seq_pos[s][p]++;
+        seq_used[s]++;
     }
 
     // remove cell i

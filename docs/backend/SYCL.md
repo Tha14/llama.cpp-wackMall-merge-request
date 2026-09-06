@@ -1,4 +1,4 @@
-# llama.cpp for SYCL
+# BeeLlama.cpp for SYCL
 
 - [Background](#background)
 - [Recommended Release](#recommended-release)

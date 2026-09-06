@@ -957,18 +957,12 @@ void llama_memory_recurrent::state_read(llama_io_read_i & io, llama_seq_id seq_i
         throw;
     }
 
-    if (!res) {
-        // TODO: fix incosistent handling of `seq_id < 0` and `seq_id == -1` in the codebase [TAG_LLAMA_SEQ_ID_NEG]
+    if (res && n_rs_seq != 0) {
         if (seq_id == -1) {
-            clear(true);
+            std::fill(rs_idx.begin(), rs_idx.end(), 0);
         } else {
-            seq_rm(seq_id, -1, -1);
+            set_rs_idx(seq_id, 0);
         }
-        throw std::runtime_error("failed to restore kv cache");
-    }
-
-    if (n_rs_seq != 0) {
-        set_rs_idx(seq_id, 0);
     }
 
     const uint32_t restore_head = head;
@@ -1268,20 +1262,6 @@ bool llama_memory_recurrent::state_read_data(llama_io_read_i & io, uint32_t cell
         if (cell_count) {
             // Read and set the keys for the whole cell range
             io.read_tensor(r_l[il], restore_head * r_size_row, cell_count * r_size_row);
-        }
-
-        if (p_l[il] != nullptr) {
-            uint64_t p_size_row_ref;
-            io.read(&p_size_row_ref, sizeof(p_size_row_ref));
-            const size_t p_size_row = ggml_row_size(p_l[il]->type, hparams.ple_conv_state());
-            if (p_size_row != p_size_row_ref) {
-                LLAMA_LOG_ERROR("%s: mismatched ple row size (%zu != %zu, layer %d)\n", __func__, p_size_row, (size_t) p_size_row_ref, il);
-                return false;
-            }
-
-            if (cell_count) {
-                io.read_tensor(p_l[il], head * p_size_row, cell_count * p_size_row);
-            }
         }
     }
 

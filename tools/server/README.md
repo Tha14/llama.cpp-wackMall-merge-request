@@ -1,8 +1,8 @@
-# LLaMA.cpp HTTP Server
+# BeeLlama.cpp HTTP Server
 
-Fast, lightweight, pure C/C++ HTTP server based on [httplib](https://github.com/yhirose/cpp-httplib), [nlohmann::json](https://github.com/nlohmann/json) and **llama.cpp**.
+Fast, lightweight C/C++ HTTP server based on [httplib](https://github.com/yhirose/cpp-httplib), [nlohmann::json](https://github.com/nlohmann/json), and BeeLlama's upstream-compatible inference engine.
 
-Set of LLM REST APIs and a web UI to interact with llama.cpp.
+It provides LLM REST APIs and a web UI for local BeeLlama inference.
 
 **Features:**
  * LLM inference of F16 and quantized models on GPU and CPU
@@ -1158,6 +1158,13 @@ In *router mode* the query param `?model={model_id}` has to be set. This endpoin
 | `llamacpp:n_tokens_max` | Counter | High watermark of the context size observed. |
 | `llamacpp:n_decode_total` | Counter | Total Number of llama_decode() calls. |
 | `llamacpp:n_busy_slots_per_decode` | Gauge | Average number of busy slots per llama_decode() call. |
+| `llamacpp:prompt_cache_accounted_bytes` | Gauge | Serialized prompt-cache payload bytes, deduplicating shared checkpoint buffers; excludes container capacity and allocator overhead. |
+| `llamacpp:prompt_cache_admission_attempts_total` | Counter | Prompt-cache RAM admission attempts. |
+| `llamacpp:prompt_cache_admission_successes_total` | Counter | Prompt-cache RAM admissions committed. |
+| `llamacpp:prompt_cache_admission_failures_total` | Counter | Prompt-cache RAM admissions rejected or failed. |
+| `llamacpp:prompt_cache_restore_attempts_total` | Counter | Prompt-cache RAM restore attempts. |
+| `llamacpp:prompt_cache_restore_successes_total` | Counter | Prompt-cache RAM restores committed. |
+| `llamacpp:prompt_cache_restore_failures_total` | Counter | Prompt-cache RAM restores rejected during preparation. |
 | `llamacpp:spec_decode_num_draft_tokens_total` | Counter | Total draft tokens generated (0 when spec-decode is off). |
 | `llamacpp:spec_decode_num_accepted_tokens_total` | Counter | Total draft tokens accepted by the target model (0 when spec-decode is off). |
 | `llamacpp:spec_decode_num_drafts_total` | Counter | Total speculative decoding verification steps (0 when spec-decode is off). |
@@ -1723,7 +1730,7 @@ You may also specify default arguments that will be passed to every model instan
 llama-server -ctx 8192 -n 1024 -np 2
 ```
 
-Note: model instances inherit both command line arguments and environment variables from the router server.
+Note: model instances inherit non-sensitive command-line arguments and environment variables from the router server. `--hf-token` is removed from child argv and passed only as `HF_TOKEN`; it is not included in model-list responses or serialized presets.
 
 Alternatively, you can also add GGUF based preset (see next section)
 
@@ -1820,10 +1827,8 @@ Listing all models in cache. The model metadata will also include a field to ind
 {
   "data": [{
     "id": "ggml-org/gemma-3-4b-it-GGUF:Q4_K_M",
-    "path": "/Users/REDACTED/Library/Caches/llama.cpp/ggml-org_gemma-3-4b-it-GGUF_gemma-3-4b-it-Q4_K_M.gguf",
     "status": {
-      "value": "loaded",
-      "args": ["llama-server", "-ctx", "4096"]
+      "value": "loaded"
     },
     "architecture": {
       "input_modalities": [
@@ -1839,11 +1844,19 @@ Listing all models in cache. The model metadata will also include a field to ind
 }
 ```
 
-Note:
-1. Adding `?reload=1` to the query params will refresh the list of models. The behavior is as follow:
-    - If a model is running but updated or removed from the source, it will be unloaded
-    - If a model is not running, it will be added or updated according to the source
-2. When the model is loaded, the info from `/v1/models` is forwarded to router's `/v1/models`. This includes metadata about the model and the runtime instance.
+`GET /models` is read-only. Query parameters cannot refresh, load, unload, or
+autoload models. Matching upstream, each entry's `status` exposes the child
+argv (`status.args`) and, for preset-backed models, the resolved INI preset
+(`status.preset`); sensitive options such as `--hf-token` and `--api-key` are
+stripped from both. Note that `status.args`/`status.preset` may contain local
+filesystem paths for preset models defined with custom paths. When a model is
+loaded, non-conflicting public metadata from the child `/v1/models` response
+may be included.
+
+To rescan model sources, use `POST /models/reload`. This may unload a running
+model whose source was updated or removed and add or update unloaded models.
+The route goes through normal API-key authentication; configure `--api-key` for
+a protected router and send `Authorization: Bearer TOKEN` (or `X-Api-Key`).
 
 The `status` object can be:
 

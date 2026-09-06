@@ -403,11 +403,6 @@ static void ggml_cuda_flash_attn_ext_mma_f16(ggml_backend_cuda_context & ctx, gg
     FATTN_VEC_CASE(256, type_K, type_V)       \
     FATTN_VEC_CASE(512, type_K, type_V)       \
 
-#define FATTN_VEC_CASES_ALL_D_TURBO(type_K, type_V) \
-    FATTN_VEC_CASE( 64, type_K, type_V)             \
-    FATTN_VEC_CASE(128, type_K, type_V)             \
-    FATTN_VEC_CASE(256, type_K, type_V)             \
-
 static ggml_type ggml_cuda_fattn_canonical_kv_type(ggml_type type) {
     return type == GGML_TYPE_F32 ? GGML_TYPE_F16 : type;
 }
@@ -428,9 +423,6 @@ static bool ggml_cuda_fattn_kv_type_supported(ggml_type type) {
         case GGML_TYPE_Q2_1:
         case GGML_TYPE_Q2_0S:
         case GGML_TYPE_IQ4_NL:
-        case GGML_TYPE_TURBO3_0:
-        case GGML_TYPE_TURBO2_0:
-        case GGML_TYPE_TURBO4_0:
             return true;
         default:
             return false;
@@ -491,20 +483,6 @@ static bool ggml_cuda_fattn_pair_compiled(ggml_type type_K, ggml_type type_V) {
     type_K = ggml_cuda_fattn_canonical_kv_type(type_K);
     type_V = ggml_cuda_fattn_canonical_kv_type(type_V);
 
-    const bool is_turbo =
-        type_K == GGML_TYPE_TURBO3_0 || type_K == GGML_TYPE_TURBO2_0 || type_K == GGML_TYPE_TURBO4_0 ||
-        type_V == GGML_TYPE_TURBO3_0 || type_V == GGML_TYPE_TURBO2_0 || type_V == GGML_TYPE_TURBO4_0;
-    // TurboQuant pairs are always compiled (dedicated vec instances exist)
-    if (is_turbo) {
-        return true;
-    }
-
-    // Deferred prefill uses F16 K with Q8_0 V (dedicated vec instances exist)
-    if ((type_K == GGML_TYPE_F16 && type_V == GGML_TYPE_Q8_0) ||
-        (type_K == GGML_TYPE_Q8_0 && type_V == GGML_TYPE_F16)) {
-        return true;
-    }
-
     if (!ggml_cuda_fattn_kv_type_supported(type_K) || !ggml_cuda_fattn_kv_type_supported(type_V) ||
         type_K == GGML_TYPE_IQ4_NL || type_V == GGML_TYPE_IQ4_NL) {
         return false;
@@ -542,44 +520,6 @@ static void ggml_cuda_flash_attn_ext_vec(ggml_backend_cuda_context & ctx, ggml_t
     ggml_tensor * V = dst->src[2];
 
 #include "fattn-vec-dispatch.cuh"
-
-    // TurboQuant3 KV cache types (always enabled)
-    FATTN_VEC_CASES_ALL_D_TURBO(GGML_TYPE_TURBO3_0, GGML_TYPE_TURBO3_0)
-
-    // Mixed turbo3/q8_0 KV cache types
-    FATTN_VEC_CASES_ALL_D_TURBO(GGML_TYPE_TURBO3_0, GGML_TYPE_Q8_0)
-    FATTN_VEC_CASES_ALL_D_TURBO(GGML_TYPE_Q8_0,     GGML_TYPE_TURBO3_0)
-
-    // TurboQuant2 KV cache types (always enabled)
-    FATTN_VEC_CASES_ALL_D_TURBO(GGML_TYPE_TURBO2_0, GGML_TYPE_TURBO2_0)
-
-    // Mixed turbo2/q8_0 KV cache types
-    FATTN_VEC_CASES_ALL_D_TURBO(GGML_TYPE_TURBO2_0, GGML_TYPE_Q8_0)
-    FATTN_VEC_CASES_ALL_D_TURBO(GGML_TYPE_Q8_0,     GGML_TYPE_TURBO2_0)
-
-    // Mixed turbo3/turbo2 KV cache types
-    FATTN_VEC_CASES_ALL_D_TURBO(GGML_TYPE_TURBO3_0, GGML_TYPE_TURBO2_0)
-    FATTN_VEC_CASES_ALL_D_TURBO(GGML_TYPE_TURBO2_0, GGML_TYPE_TURBO3_0)
-
-    // TurboQuant4 KV cache types (always enabled)
-    FATTN_VEC_CASES_ALL_D_TURBO(GGML_TYPE_TURBO4_0, GGML_TYPE_TURBO4_0)
-
-    // Mixed turbo4/q8_0 KV cache types
-    FATTN_VEC_CASES_ALL_D_TURBO(GGML_TYPE_TURBO4_0, GGML_TYPE_Q8_0)
-    FATTN_VEC_CASES_ALL_D_TURBO(GGML_TYPE_Q8_0,     GGML_TYPE_TURBO4_0)
-
-    // Mixed turbo4/turbo3 KV cache types
-    FATTN_VEC_CASES_ALL_D_TURBO(GGML_TYPE_TURBO4_0, GGML_TYPE_TURBO3_0)
-    FATTN_VEC_CASES_ALL_D_TURBO(GGML_TYPE_TURBO3_0, GGML_TYPE_TURBO4_0)
-
-    // Mixed turbo4/turbo2 KV cache types
-    FATTN_VEC_CASES_ALL_D_TURBO(GGML_TYPE_TURBO4_0, GGML_TYPE_TURBO2_0)
-    FATTN_VEC_CASES_ALL_D_TURBO(GGML_TYPE_TURBO2_0, GGML_TYPE_TURBO4_0)
-
-    // F16 K + various V (needed during deferred prefill)
-    FATTN_VEC_CASES_ALL_D(GGML_TYPE_F16,       GGML_TYPE_Q8_0)
-    FATTN_VEC_CASES_ALL_D_TURBO(GGML_TYPE_F16,       GGML_TYPE_TURBO3_0)
-    FATTN_VEC_CASES_ALL_D_TURBO(GGML_TYPE_F16,       GGML_TYPE_TURBO4_0)
 
     GGML_ABORT("fatal error");
 }
@@ -702,14 +642,9 @@ static best_fattn_kernel ggml_cuda_get_best_fattn_kernel(const int device, const
 
     // For small batch sizes the vector kernel may be preferable over the kernels optimized for large batch sizes:
     // 192 satisfies % 64 == 0 but has no vec instance (DKQ != DV); force it onto the MMA path.
-    const bool is_turbo_kv =
-        K->type == GGML_TYPE_TURBO3_0 || K->type == GGML_TYPE_TURBO2_0 || K->type == GGML_TYPE_TURBO4_0 ||
-        V->type == GGML_TYPE_TURBO3_0 || V->type == GGML_TYPE_TURBO2_0 || V->type == GGML_TYPE_TURBO4_0;
-    // TurboQuant vec kernels are instantiated for D in {64, 128, 256} only
-    const int64_t vec_d_max = is_turbo_kv ? 256 : 512;
     const bool can_use_vector_kernel =
         ggml_cuda_fattn_pair_compiled(K->type, V->type) &&
-        Q->ne[0] <= vec_d_max && Q->ne[0] % 64 == 0 && Q->ne[0] != 192 &&
+        Q->ne[0] <= 512 && Q->ne[0] % 64 == 0 && Q->ne[0] != 192 &&
         K->ne[1] % FATTN_KQ_STRIDE == 0;
 
     const bool force_vector_kernel =
