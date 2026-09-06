@@ -582,6 +582,25 @@ struct common_params {
     int32_t verbosity                  = 3;  // LOG_LEVEL_INFO
     int32_t control_vector_layer_start = -1; // layer range for control vector
     int32_t control_vector_layer_end   = -1; // layer range for control vector
+
+    float expert_heat_decay      = 0.999f; // multiplicative decay per update
+    int   expert_heat_log_period = 0;    // print heatmap at generation end (0 = off)
+    int   expert_hot_s           = 0;      // top-S expert slots (0 = disabled)
+    int   expert_sync_period      = 1;     // hot store re-sync cadence in tokens
+    float expert_hyst            = 1.3f;  // hysteresis ratio: only swap when cold >= hyst x hot
+    int   expert_dwell           = 0;    // minimum updates a resident slot must keep before a swap
+    int   expert_pin_pct         = -1;   // percent of cold experts to keep pinned (madvise); -1 = auto
+    int   expert_move_mode            = 0;    // expert store mode: 0 = auto, 1 = copy, 2 = move
+    int   expert_swaps_per_turn       = 0;    // model-wide expert swaps per sync turn (0 = unlimited)
+    bool  expert_sidecar         = false; // load/save the expert heatmap sidecar (<model>.tier)
+    int   expert_gpu             = -1;   // expert store GPU index, resolved from --expert-gpu (index or device name like CUDA0; -1 = all GPUs)
+    float expert_hot_split[128]  = {0};  // per-GPU hot-slot proportions (relative, like tensor-split)
+    bool  expert_hot_split_set   = false; // set when --expert-hot-split was given
+    int   expert_cold_s          = 0;    // bottom-C expert slots parked on the coldstore GPU (0 = disabled)
+    int   expert_cold_gpu        = -1;   // coldstore GPU index, resolved from --expert-cold-gpu (device name like CUDA1; -1 = disabled)
+    int   expert_boot_tokens     = 512;  // fast-start converge window in decode tokens; 0 = phase off
+    int   expert_cold_dwell_min  = 2;    // min cold syncs a coldstore slot keeps before eviction
+    int   expert_cold_sync_step  = 4;    // run the cold re-sync every Nth hot re-sync; 0 = never
     bool    offline                    = false;
 
     int32_t ppl_stride      = 0;     // stride for perplexity calculations. If left at 0, the pre-existing approach will be used.

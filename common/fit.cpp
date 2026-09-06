@@ -181,7 +181,7 @@ common_device_memory_data_vec common_get_device_memory_data(
 static void common_params_fit_impl(
         const char * path_model, struct llama_model_params * mparams, struct llama_context_params * cparams,
         float * tensor_split, struct llama_model_tensor_buft_override * tensor_buft_overrides,
-        size_t * margins_s, uint32_t n_ctx_min, const common_fit_extra_model * extra, enum ggml_log_level log_level) {
+        size_t * margins_s, uint32_t n_ctx_min, const common_fit_extra_model * extra, enum ggml_log_level log_level, int * n_expert_hot_s) {
     if (mparams->split_mode == LLAMA_SPLIT_MODE_TENSOR) {
         throw common_params_fit_exception("llama_params_fit is not implemented for SPLIT_MODE_TENSOR, abort");
     }
@@ -313,6 +313,8 @@ static void common_params_fit_impl(
     int64_t sum_projected_free  = 0;
     int64_t sum_projected_used  = 0;
     int64_t sum_projected_model = 0;
+    int64_t total_moe_bytes = 0; // MoE expert tensor bytes (for slot autofit)
+    int64_t dense_model_gpu = 0; // dense-only model bytes on GPU (for slot autofit)
     std::vector<int64_t> projected_free_per_device;
     projected_free_per_device.reserve(nd);
 
@@ -631,6 +633,8 @@ static void common_params_fit_impl(
         for (size_t id = 0; id < nd; id++) {
             global_surplus_cpu_moe += dmds_cpu_moe[id].free;
             global_surplus_cpu_moe -= int64_t(dmds_cpu_moe[id].mb.total()) + margins[id];
+            total_moe_bytes += int64_t(dmds_full[id].mb.model) - int64_t(dmds_cpu_moe[id].mb.model);
+            dense_model_gpu += int64_t(dmds_cpu_moe[id].mb.model);
         }
 
         if (global_surplus_cpu_moe > 0) {
@@ -876,6 +880,25 @@ static void common_params_fit_impl(
     }
 
     set_ngl_tensor_split_tbo(ngl_per_device, overflow_bufts, *mparams);
+
+    // step 5: autofit the expert hot store slots when --expert-hot-s -1 is set.
+    if (n_expert_hot_s && total_moe_bytes > 0) {
+        dmds_t dmds_final = common_get_device_memory_data_impl(
+            path_model, mparams, cparams, devs, hp_ngl, hp_nct, hp_nex, log_level);
+        add_extra_memory(dmds_final);
+        int64_t final_gpu_model = 0;
+        bool is_vulkan = false;
+        for (size_t id = 0; id < nd; id++) {
+            final_gpu_model += dmds_final[id].mb.model;
+            if (dev_names[id].find("Vulkan") != std::string::npos) {
+                is_vulkan = true;
+            }
+        }
+        const int64_t vulkan_padding = is_vulkan ? int64_t(hp_ngl) * 8 * MiB : 0;
+        const int64_t moe_on_gpu = final_gpu_model - dense_model_gpu - vulkan_padding;
+        const int64_t s = moe_on_gpu > 0 ? int64_t(hp_nex) * moe_on_gpu / total_moe_bytes : 0;
+        *n_expert_hot_s = s > 1 ? (int) (s - 1) : 0;
+    }
 }
 
 static std::string common_bee_fit_candidate_identity(
@@ -939,7 +962,8 @@ enum common_params_fit_status common_fit_params(
         size_t * margins,
         uint32_t n_ctx_min,
         const common_fit_extra_model * extra,
-        ggml_log_level log_level) {
+        ggml_log_level log_level,
+        int * n_expert_hot_s) {
     const int64_t t0_us = llama_time_us();
     common_params_fit_status status = COMMON_PARAMS_FIT_STATUS_SUCCESS;
     try {
@@ -947,7 +971,7 @@ enum common_params_fit_status common_fit_params(
         // attached. Only KVarN/precision-tail callers pay for exact validation.
         if (cparams->kv_tail_request == nullptr) {
             common_params_fit_impl(path_model, mparams, cparams, tensor_split,
-                    tensor_buft_overrides, margins, n_ctx_min, extra, log_level);
+                    tensor_buft_overrides, margins, n_ctx_min, extra, log_level, n_expert_hot_s);
         } else {
             const llama_model_params pristine_mparams = *mparams;
             const llama_context_params pristine_cparams = *cparams;
@@ -988,7 +1012,7 @@ enum common_params_fit_status common_fit_params(
                         tensor_buft_overrides, pristine_mparams, pristine_cparams,
                         pristine_tensor_split, pristine_overrides);
                 common_params_fit_impl(path_model, mparams, cparams, tensor_split,
-                        tensor_buft_overrides, adjusted_margins.data(), n_ctx_min, extra, log_level);
+                        tensor_buft_overrides, adjusted_margins.data(), n_ctx_min, extra, log_level, n_expert_hot_s);
 
                 std::vector<ggml_backend_dev_t> devs;
                 uint32_t hp_ngl = 0;

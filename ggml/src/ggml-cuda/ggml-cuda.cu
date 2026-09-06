@@ -1889,7 +1889,7 @@ static void ggml_cuda_mul_mat(ggml_backend_cuda_context & ctx, const ggml_tensor
         ggml_cuda_mul_mat_vec_f(ctx, src1, src0, nullptr, &dst_vec);
         return;
     }
-    if (ggml_cuda_should_use_mmf(src0->type, cc, warp_size, src0->ne, src0->nb, src1, src1->ne[2], /*mul_mat_id =*/ false)) {
+    if (ggml_cuda_should_use_mmf(src0->type, cc, warp_size, src0->ne, src0->nb, src1, ne11, /*mul_mat_id =*/ false)) {
         ggml_cuda_mul_mat_f(ctx, src0, src1, nullptr, dst);
         return;
     }
@@ -4881,6 +4881,14 @@ static std::string ggml_cuda_device_description(int device) {
 
 void ggml_backend_cuda_get_device_description(int device, char * description, size_t description_size) {
     snprintf(description, description_size, "%s", ggml_cuda_device_description(device).c_str());
+}
+
+int ggml_backend_cuda_get_device_cc(int device) {
+    const ggml_cuda_device_info & info = ggml_cuda_info();
+    if (device < 0 || device >= info.device_count) {
+        return 0;
+    }
+    return info.devices[device].cc;
 }
 
 static int ggml_cuda_physical_device_share_count(int device) {

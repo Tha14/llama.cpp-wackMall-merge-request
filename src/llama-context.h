@@ -7,6 +7,11 @@
 #include "llama-adapter.h"
 #include "llama-impl.h"
 #include "llama-memory.h"
+#include "llama-expert-heatmap.h"
+#include "llama-expert-hotstore.h"
+
+#include "ggml-cpp.h"
+#include "ggml-opt.h"
 
 #include "ggml-cpp.h"
 #include "ggml-opt.h"
@@ -256,6 +261,13 @@ public:
 
     bool set_sampler(llama_seq_id seq_id, llama_sampler * sampler);
 
+    // expert hotstore hit rate
+    bool hotstore_hit_rate(size_t & hits, size_t & total) const;
+    bool hit_rate_avg(size_t & hits, size_t & total) const;
+
+    // expert heatmap logging
+    void print_expert_heatmap() const;
+
 private:
     llm_graph_params graph_params(
                         llm_graph_result * res,
@@ -396,4 +408,15 @@ private:
     mutable int32_t n_eval   = 0; // number of eval calls
 
     mutable int32_t n_reused = 0; // number of times the previous graph was reused
+
+    // expert heatmap and sidecar
+    std::unique_ptr<llama_expert_heatmap> expert_heatmap = nullptr;
+    std::unique_ptr<llama_expert_hotstore> expert_hotstore = nullptr;
+    bool expert_sidecar_enabled = false;
+    std::string expert_sidecar_path;
+    mutable int64_t t_compute_us = 0; // wall-clock feed for the resync cadence
 };
+
+// free functions
+void llama_print_expert_heatmap(const struct llama_context * ctx);
+bool llama_context_hotstore_hit_rate(const llama_context * ctx, size_t * hits, size_t * total);

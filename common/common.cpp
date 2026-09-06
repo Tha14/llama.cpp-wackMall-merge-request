@@ -1428,14 +1428,41 @@ common_init_result::common_init_result(common_params & params, bool model_only) 
             /*.shares_model =*/ !has_draft, // an MTP context runs on the weights of the main model
         };
 
+        int n_expert_hot_s = params.expert_hot_s;
+        int * p_expert_hot_s = params.expert_hot_s == -1 ? &n_expert_hot_s : nullptr;
+
         common_fit_params(params.model.path.c_str(), &mparams, &cparams,
             params.tensor_split,
             params.tensor_buft_overrides.data(),
             params.fit_params_target.data(),
             params.fit_params_min_ctx,
             has_draft || spec_mtp ? &extra : nullptr,
-            params.verbosity >= LOG_LEVEL_DEBUG ? GGML_LOG_LEVEL_DEBUG : GGML_LOG_LEVEL_ERROR);
+            params.verbosity >= LOG_LEVEL_DEBUG ? GGML_LOG_LEVEL_DEBUG : GGML_LOG_LEVEL_ERROR,
+            p_expert_hot_s);
+        if (params.expert_hot_s == -1) {
+            params.expert_hot_s = n_expert_hot_s > 0 ? n_expert_hot_s : 0;
+            cparams.expert_hot_s = params.expert_hot_s;
+        }
     }
+
+    cparams.expert_heat_decay  = params.expert_heat_decay;
+    cparams.expert_heat_log_period = params.expert_heat_log_period;
+    cparams.expert_hot_s       = params.expert_hot_s;
+    cparams.expert_sync_period  = params.expert_sync_period;
+    cparams.expert_hyst         = params.expert_hyst;
+    cparams.expert_dwell        = params.expert_dwell;
+    cparams.expert_pin_pct      = params.expert_pin_pct;
+    cparams.expert_move_mode       = params.expert_move_mode;
+    cparams.expert_sidecar      = params.expert_sidecar;
+    cparams.expert_gpu          = params.expert_gpu;
+    cparams.expert_swaps_per_turn = params.expert_swaps_per_turn;
+    memcpy(cparams.expert_hot_split, params.expert_hot_split, sizeof(params.expert_hot_split));
+    cparams.expert_hot_split_set  = params.expert_hot_split_set;
+    cparams.expert_cold_s       = params.expert_cold_s;
+    cparams.expert_cold_gpu     = params.expert_cold_gpu;
+    cparams.expert_boot_tokens  = params.expert_boot_tokens;
+    cparams.expert_cold_dwell_min = params.expert_cold_dwell_min;
+    cparams.expert_cold_sync_step = params.expert_cold_sync_step;
 
     llama_model * model = llama_model_load_from_file(params.model.path.c_str(), mparams);
     if (model == NULL) {

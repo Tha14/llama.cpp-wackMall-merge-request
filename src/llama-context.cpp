@@ -1,5 +1,9 @@
 #include "llama-context.h"
 
+#include "llama-expert-pin.h"
+#include "llama-expert-preload.h"
+#include "llama-expert-tier.h"
+
 #include "ggml.h"
 #include "llama-arch.h"
 #include "llama-graph.h"
@@ -11,6 +15,7 @@
 #include "llama-kv-tail-request.h"
 #include "llama-kvarn.h"
 #include "llama-memory.h"
+#include "llama-kv-cache.h"
 #include "llama-mmap.h"
 #include "llama-model.h"
 #include "llama-ext.h"
@@ -825,6 +830,118 @@ llama_context::llama_context(
         }
     }
 
+    // heatmap exists for the tier, the heat log, or standalone pinning
+    // (LLAMA_EXPERT_PIN without the hot store)
+    llama_expert_pin::set_pct(params.expert_pin_pct);
+    if (hparams.n_expert > 0 && !cparams.warmup &&
+        (params.expert_heat_log_period != 0 || params.expert_hot_s != 0 ||
+         llama_expert_pin::active())) {
+        expert_heatmap = std::make_unique<llama_expert_heatmap>(
+            hparams.n_layer(), hparams.n_expert,
+            params.expert_heat_decay,
+            params.expert_heat_log_period,
+            params.expert_hot_s);
+    }
+
+    // expert sidecar: restore the heatmap from <model>.tier if present; the
+    // store starts pre-warmed and keeps adapting from there
+    expert_sidecar_enabled = params.expert_sidecar;
+    expert_sidecar_path = std::string(params.model_path ? params.model_path : "") + ".tier";
+    if (expert_heatmap && params.expert_sidecar) {
+        expert_heatmap->load(expert_sidecar_path.c_str());
+    }
+
+    if (hparams.n_expert > 0 && !cparams.warmup && params.expert_hot_s != 0) {
+        if (params.expert_gpu >= 0 && params.expert_hot_split_set) {
+            LLAMA_LOG_WARN("%s: --expert-hot-split is ignored when --expert-gpu pins a single device\n", __func__);
+        }
+        const int sync_period = params.expert_sync_period;
+        const bool cold_active = params.expert_cold_s > 0 && params.expert_cold_gpu >= 0;
+        expert_hotstore = std::make_unique<llama_expert_hotstore>(
+            &model, hparams.n_layer(), hparams.n_expert,
+            params.expert_hot_s, params.expert_cold_s, sync_period,
+            params.expert_hyst, params.expert_dwell, params.expert_move_mode,
+            params.expert_swaps_per_turn,
+            params.expert_boot_tokens, params.expert_cold_dwell_min,
+            params.expert_cold_sync_step);
+        // enable the GPU hot store on any GPU backend (CUDA, Vulkan, ROCm,
+        // SYCL, Metal, ...).
+        bool cache_enabled = false;
+        bool cc_blocked = false;
+        std::vector<ggml_backend_buffer_type_t> gpu_bufts;
+        {
+            int dev_idx = 0; // index among GPU (non-CPU/ACCEL) devices
+            for (auto & backend : backends) {
+                ggml_backend_dev_t dev = ggml_backend_get_device(backend.get());
+                const enum ggml_backend_dev_type type = ggml_backend_dev_type(dev);
+                if (type == GGML_BACKEND_DEVICE_TYPE_CPU || type == GGML_BACKEND_DEVICE_TYPE_ACCEL) {
+                    continue;
+                }
+                if (params.expert_gpu >= 0 && dev_idx != params.expert_gpu) {
+                    dev_idx++;
+                    continue; // store pinned to a specific GPU: skip the others
+                }
+                if (cold_active && dev_idx == params.expert_cold_gpu) {
+                    dev_idx++;
+                    continue; // the coldstore owns this GPU: keep it out of the hot store
+                }
+                gpu_bufts.push_back(ggml_backend_get_default_buffer_type(backend.get()));
+                dev_idx++;
+            }
+        }
+        if (params.expert_gpu >= 0 && cold_active && params.expert_gpu == params.expert_cold_gpu) {
+            LLAMA_LOG_WARN("%s: --expert-cold-gpu and --expert-gpu target the same device; cold store OFF\n", __func__);
+        } else if (!gpu_bufts.empty()) {
+            // compute capability floor: never host the store on too-old GPUs
+            // (sm_61 regresses decode; see RFC #25857). LLAMA_EXPERT_FORCE bypasses.
+            const int min_cc = llama_expert_preload::gpu_min_cc(params.expert_gpu);
+            if (!getenv("LLAMA_EXPERT_FORCE") && min_cc > 0 && min_cc < llama_expert_preload::EXPERT_MIN_CC) {
+                LLAMA_LOG_WARN("%s: expert cache is OFF: GPU compute capability %d.%d below sm_70 (need sm_70+)\n",
+                    __func__, min_cc / 100, (min_cc / 10) % 10);
+                cc_blocked = true;
+            } else {
+                // per-GPU hot slot split: --expert-hot-split wins over the
+                // model tensor-split when both are present (-1 = all GPUs)
+                const float * hot_split = params.expert_hot_split_set ? params.expert_hot_split : nullptr;
+                cache_enabled = expert_hotstore->allocate(gpu_bufts, hot_split, (int) gpu_bufts.size(), model.tensor_split(), (int) gpu_bufts.size());
+            }
+        }
+        // coldstore: park the bottom-C experts on the dedicated cold GPU
+        if (cold_active) {
+            if (params.expert_hot_s == 0 || !cache_enabled) {
+                LLAMA_LOG_WARN("%s: cold store OFF: requires the hot store to be active\n", __func__);
+            } else {
+                ggml_backend_buffer_type_t cold_buft = nullptr;
+                {
+                    int dev_idx = 0;
+                    for (auto & backend : backends) {
+                        ggml_backend_dev_t dev = ggml_backend_get_device(backend.get());
+                        const enum ggml_backend_dev_type type = ggml_backend_dev_type(dev);
+                        if (type == GGML_BACKEND_DEVICE_TYPE_CPU || type == GGML_BACKEND_DEVICE_TYPE_ACCEL) {
+                            continue;
+                        }
+                        if (dev_idx == params.expert_cold_gpu) {
+                            cold_buft = ggml_backend_get_default_buffer_type(backend.get());
+                            break;
+                        }
+                        dev_idx++;
+                    }
+                }
+                if (!cold_buft) {
+                    LLAMA_LOG_WARN("%s: cold store OFF: --expert-cold-gpu device not found\n", __func__);
+                } else if (!expert_hotstore->allocate_cold(cold_buft, params.expert_cold_s)) {
+                    LLAMA_LOG_WARN("%s: cold store OFF: allocation failed on the cold device\n", __func__);
+                }
+            }
+        }
+        // launch hint: cache did not engage, usually no GPU accelerator
+        if (!cache_enabled && !cc_blocked) {
+            LLAMA_LOG_WARN("%s: expert cache is OFF: %d slots requested but no GPU backend in use\n",
+                __func__, params.expert_hot_s);
+        }
+        expert_hotstore->log();
+    }
+
     // Initialize the full vocabulary token ids for backend samplers.
     {
         const int n_vocab = model.vocab.n_tokens();
@@ -837,6 +954,10 @@ llama_context::llama_context(
 }
 
 llama_context::~llama_context() {
+    if (expert_heatmap && expert_sidecar_enabled && !cparams.warmup) {
+        const std::string sc = expert_sidecar_path;
+        expert_heatmap->save(sc.c_str());
+    }
     // wait for any pending asynchronous copies into the output buffers before they are freed
     synchronize();
 
@@ -1771,6 +1892,11 @@ llm_graph_result * llama_context::process_ubatch(const llama_ubatch & ubatch, ll
     auto * res = gf_res_prev.get();
     auto * gf  = res->get_gf();
 
+    // the tier (hot store + CPU cold op) is a decode-only optimization: for
+    // multi-token ubatches it sinks the bulk of MoE work into the CPU cold op.
+    // bypass it during prefill so prompt processing stays on the stock GPU path.
+    llama_expert_tier_set_engage(ubatch.n_tokens == 1);
+
     // the new graph parameters
     // in order to correctly reuse a graph, it's full topology has to be uniquely determined by these parameters
     const auto gparams = graph_params(res, ubatch, mctx, gtype);
@@ -1838,6 +1964,51 @@ llm_graph_result * llama_context::process_ubatch(const llama_ubatch & ubatch, ll
         LLAMA_LOG_ERROR("%s: failed to compute graph, compute status: %d\n", __func__, status);
         ret = status;
         return nullptr;
+    }
+
+    // wall-clock feed for the resync cadence (decode compute time)
+    if (expert_hotstore && ubatch.n_tokens == 1) {
+        expert_hotstore->note_decode(ggml_time_us() - t_compute_us);
+    }
+
+    // cold-op counts feed the heatmap directly (no D2H readback, no sync).
+    // decode only: prefill routing is uniform and would dilute the ranking.
+    if (expert_heatmap && expert_hotstore && expert_hotstore->is_filled && ubatch.n_tokens == 1) {
+        expert_hotstore->read_counts(*expert_heatmap, ubatch.n_tokens);
+    }
+    if (expert_heatmap && expert_hotstore && expert_hotstore->is_filled) {
+        expert_hotstore->maybe_resync(*expert_heatmap, ubatch.n_tokens > 1);
+        if (ubatch.n_tokens == 1 && getenv("LLAMA_EXPERT_HITRATE")) {
+            expert_hotstore->log_hit_rate(res->moe_sel_experts);
+        }
+    }
+
+    // standalone pin mode (no hot store): feed the heatmap from the graph
+    // readback. decode only (see above).
+    if (expert_heatmap && !expert_hotstore && llama_expert_pin::active() && ubatch.n_tokens == 1) {
+        expert_heatmap->tick(1);
+        synchronize();
+        for (const auto & [il, tensor] : res->moe_sel_experts) {
+            if (!tensor || !tensor->data) {
+                continue;
+            }
+            const int n_ids = (int) tensor->ne[0];
+            const int n_tokens = (int) tensor->ne[1];
+            std::vector<int32_t> ids((size_t) n_ids * n_tokens);
+            ggml_backend_tensor_get(tensor, ids.data(), 0, ids.size() * sizeof(int32_t));
+            expert_heatmap->update_ids(il, ids.data(), n_ids, n_tokens);
+        }
+    }
+
+    // mmap page hints for the expert tier (hot store active: GPU-aware sets;
+    // standalone: everything is cold, warm the top fraction)
+    if (expert_heatmap && llama_expert_pin::active()) {
+        llama_expert_hotstore * hs = expert_hotstore.get();
+        llama_expert_pin::maybe_run(&model, expert_heatmap.get(),
+            [](void * ud, int il, int e) -> bool {
+                return ud != nullptr && static_cast<llama_expert_hotstore *>(ud)->is_resident(il, e);
+            },
+            hs);
     }
 
     ret = GGML_STATUS_SUCCESS;
@@ -2266,6 +2437,18 @@ int llama_context::decode(const llama_batch & batch_inp) {
             // needs to happen before the graph is built
             n_outputs = n_outputs_new;
         }
+
+        // Deferred quantization: convert F16 K-cache to quantized after prefill.
+        // Only on CUDA - Metal FA doesn't support mixed quantized K + F16 V yet.
+#ifdef GGML_USE_CUDA
+        if (ubatch.n_tokens == 1 && memory) {
+            auto * kv = dynamic_cast<llama_kv_cache *>(memory.get());
+            if (kv && kv->convert_deferred_keys()) {
+                sched_need_reserve = true;
+                sched_reserve();
+            }
+        }
+#endif
 
         ggml_status status;
 
@@ -2773,6 +2956,19 @@ uint32_t llama_context::graph_max_nodes(uint32_t n_tokens) const {
         res += lora->get_n_nodes();
     }
     return res;
+}
+
+void llama_context::print_expert_heatmap() const {
+    // --expert-heat-log-period: print at generation end (0 = off)
+    if (expert_heatmap && expert_heatmap->log_period != 0) {
+        expert_heatmap->log();
+    }
+}
+
+void llama_print_expert_heatmap(const struct llama_context * ctx) {
+    if (ctx) {
+        ctx->print_expert_heatmap();
+    }
 }
 
 llm_graph_result * llama_context::get_gf_res_reserve() const {
@@ -4045,6 +4241,15 @@ llama_perf_context_data llama_context::perf_get_data() const {
     return data;
 }
 
+bool llama_context::hotstore_hit_rate(size_t & hits, size_t & total) const {
+    hits = 0;
+    total = 0;
+    if (!expert_hotstore) {
+        return false;
+    }
+    return expert_hotstore->hit_rate_avg(hits, total);
+}
+
 void llama_context::perf_reset() {
     t_start_us  = ggml_time_us();
     t_eval_us   = n_eval = 0;
@@ -4352,6 +4557,25 @@ llama_context_params llama_context_default_params() {
         /*.kv_unified                  =*/ false,
         /*.sampler                     =*/ nullptr,
         /*.n_sampler                   =*/ 0,
+        /*.model_path                  =*/ nullptr,
+        /*.expert_heat_decay           =*/ 0.999f,
+        /*.expert_heat_log_period      =*/ 0,
+        /*.expert_hot_s                =*/ 0,
+        /*.expert_sync_period          =*/ 1,
+        /*.expert_hyst                 =*/ 1.3f,
+        /*.expert_dwell                =*/ 0,
+        /*.expert_pin_pct              =*/ -1,
+        /*.expert_move_mode                 =*/ 0,
+        /*.expert_sidecar              =*/ false,
+        /*.expert_gpu                  =*/ -1,
+        /*.expert_swaps_per_turn       =*/ 0,
+        /*.expert_hot_split            =*/ {0},
+        /*.expert_hot_split_set        =*/ false,
+        /*.expert_cold_s               =*/ 0,
+        /*.expert_cold_gpu             =*/ -1,
+        /*.expert_boot_tokens          =*/ 512,
+        /*.expert_cold_dwell_min       =*/ 2,
+        /*.expert_cold_sync_step       =*/ 4,
         /*.ctx_other                   =*/ nullptr,
         /*.kv_tail_tokens              =*/ 0,
         /*.kv_tail_type                =*/ GGML_TYPE_COUNT,
@@ -4476,7 +4700,8 @@ llama_context * llama_init_from_model(
     if (params.flash_attn_type != LLAMA_FLASH_ATTN_TYPE_DISABLED && ggml_is_quantized(params.type_k)) {
         const uint32_t blck_size = ggml_blck_size(params.type_k);
         for (uint32_t il = 0; il < model->hparams.n_layer(); ++il) {
-            if (model->hparams.n_embd_head_k(il) % blck_size != 0) {
+            uint32_t head_k = model->hparams.n_embd_head_k(il);
+            if (head_k % blck_size != 0) {
                 LLAMA_LOG_ERROR("%s: K cache type %s with block size %u does not divide n_embd_head_k=%u\n",
                     __func__, ggml_type_name(params.type_k), blck_size, model->hparams.n_embd_head_k(il));
                 return nullptr;
@@ -4487,7 +4712,8 @@ llama_context * llama_init_from_model(
     if (params.flash_attn_type != LLAMA_FLASH_ATTN_TYPE_DISABLED && ggml_is_quantized(params.type_v)) {
         const uint32_t blck_size = ggml_blck_size(params.type_v);
         for (uint32_t il = 0; il < model->hparams.n_layer(); ++il) {
-            if (model->hparams.n_embd_head_v(il) % blck_size != 0) {
+            uint32_t head_v = model->hparams.n_embd_head_v(il);
+            if (head_v % blck_size != 0) {
                 LLAMA_LOG_ERROR("%s: V cache type %s with block size %u does not divide n_embd_head_v=%u\n",
                     __func__, ggml_type_name(params.type_v), blck_size, model->hparams.n_embd_head_v(il));
                 return nullptr;
@@ -5136,6 +5362,11 @@ void llama_perf_context_print(const llama_context * ctx) {
 
     const double t_end_ms = 1e-3 * ggml_time_us();
 
+    size_t eh = 0, et = 0;
+    if (ctx && ctx->hotstore_hit_rate(eh, et) && et > 0) {
+        LLAMA_LOG_INFO("hotstore: hit rate %zu/%zu = %.1f%%\n", eh, et, 100.0f * (float) eh / (float) et);
+    }
+
     LLAMA_LOG_INFO("%s:        load time = %10.2f ms\n", __func__, data.t_load_ms);
     LLAMA_LOG_INFO("%s: prompt eval time = %10.2f ms / %5d tokens (%8.2f ms per token, %8.2f tokens per second)\n",
             __func__, data.t_p_eval_ms, data.n_p_eval, data.t_p_eval_ms / data.n_p_eval, 1e3 / data.t_p_eval_ms * data.n_p_eval);
@@ -5147,6 +5378,18 @@ void llama_perf_context_print(const llama_context * ctx) {
 
 void llama_perf_context_reset(llama_context * ctx) {
     ctx->perf_reset();
+}
+
+bool llama_context_hotstore_hit_rate(const llama_context * ctx, size_t * hits, size_t * total) {
+    size_t h = 0, t = 0;
+    const bool ok = ctx && ctx->hotstore_hit_rate(h, t);
+    if (hits) {
+        *hits = h;
+    }
+    if (total) {
+        *total = t;
+    }
+    return ok;
 }
 
 //

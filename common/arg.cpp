@@ -7,6 +7,7 @@
 #include "json-schema-to-grammar.h"
 #include "json.h"
 #include "llama.h"
+#include "../src/llama-expert-preload.h"
 #include "log.h"
 #include "sampling.h"
 #include "speculative.h"
@@ -3089,6 +3090,32 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
             }
         }
     ).set_env("LLAMA_ARG_N_GPU_LAYERS"));
+    // manual hot store slots need all MoE weights in the CPU (host pointers);
+    // auto-activate -cmoe unless the user already did (or wants autofit slots).
+    // a GPU below sm_70 (compute capability gate) disables the cache: sm_61
+    // regresses decode (see RFC #25857), so the store must not engage.
+    if (params.expert_hot_s > 0) {
+        ggml_backend_load_all();
+        bool has_cmoe = false;
+        for (const auto & o : params.tensor_buft_overrides) {
+            if (o.pattern != nullptr && strcmp(o.pattern, LLM_FFN_EXPS_REGEX) == 0) {
+                has_cmoe = true;
+                break;
+            }
+        }
+        if (!has_cmoe) {
+            const int min_cc = llama_expert_preload::gpu_min_cc(params.expert_gpu);
+            const bool forced = getenv("LLAMA_EXPERT_FORCE") != nullptr;
+            if (!forced && min_cc > 0 && min_cc < llama_expert_preload::EXPERT_MIN_CC) {
+                LOG_WRN("GPU compute capability %d.%d too old for the expert cache (need sm_70+); expert cache is OFF\n",
+                    min_cc / 100, (min_cc / 10) % 10);
+                params.expert_hot_s = 0;
+            } else {
+                params.tensor_buft_overrides.push_back(llm_ffn_exps_cpu_override());
+                LOG_WRN("manually selecting --expert-hot-s slots activates --cmoe (all MoE weights kept in the CPU)\n");
+            }
+        }
+    }
     add_opt(common_arg(
         {"-sm", "--split-mode"}, "{none,layer,row,tensor}",
         "how to split the model across multiple GPUs, one of:\n"
@@ -3140,6 +3167,161 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
             }
         }
     ).set_env("LLAMA_ARG_TENSOR_SPLIT"));
+    add_opt(common_arg(
+        {"--expert-heat-decay"}, "F",
+        "expert heatmap decay rate per update (default: 0.999)",
+        [](common_params & params, const std::string & value) {
+            params.expert_heat_decay = std::stof(value);
+        }
+    ));
+    add_opt(common_arg(
+        {"--expert-heat-log-period"}, "N",
+        "print the expert heatmap at generation end (default: 0, 0 = off)",
+        [](common_params & params, int value) {
+            params.expert_heat_log_period = value;
+        }
+    ));
+    add_opt(common_arg(
+        {"--expert-sync-period"}, "N",
+        "expert hot store re-sync cadence in tokens (default: 1)",
+        [](common_params & params, int value) {
+            params.expert_sync_period = value;
+        }
+    ));
+    add_opt(common_arg(
+        {"--expert-hyst"}, "F",
+        "expert hot store hysteresis ratio (default: 1.3, 0 = off)",
+        [](common_params & params, const std::string & value) {
+            params.expert_hyst = std::stof(value);
+        }
+    ));
+    add_opt(common_arg(
+        {"--expert-dwell"}, "N",
+        "expert hot store minimum dwell updates before swap (default: 0 = off)",
+        [](common_params & params, int value) {
+            params.expert_dwell = value;
+        }
+    ));
+    add_opt(common_arg(
+        {"-ehs", "--expert-hot-s"}, "N",
+        "-1 = autofit slots from free VRAM, 0 = disabled, N = manual top-N slots",
+        [](common_params & params, int value) {
+            params.expert_hot_s = value;
+            llama_expert_preload::set_slots(value);
+        }
+    ));
+    add_opt(common_arg(
+        {"--expert-pin"}, "N",
+        "fraction (percent) of cold experts to keep pinned in RAM via madvise, "
+        "0 = off, -1 = auto (hot store sets 40, else 0)",
+        [](common_params & params, int value) {
+            params.expert_pin_pct = value;
+        }
+    ));
+    add_opt(common_arg(
+        {"--expert-no-evict"},
+        {},
+        "never evict experts from the hot store (fill-only, no move-back)",
+        [](common_params &, bool value) {
+            llama_expert_preload::set_no_evict(value);
+        }
+    ));
+    add_opt(common_arg(
+        {"--expert-move-mode"}, "N",
+        "expert store mode: 0 = auto, 1 = copy (keep RAM copy), 2 = move "
+        "(free RAM after verified transfer)",
+        [](common_params & params, int value) {
+            params.expert_move_mode = value;
+        }
+    ));
+    add_opt(common_arg(
+        {"--expert-swaps-per-turn"}, "N",
+        "model-wide expert swaps allowed per sync turn (default: 0 = unlimited); "
+        ">0 enables an ultra-low-bandwidth mode with a fixed 32-token turn",
+        [](common_params & params, int value) {
+            params.expert_swaps_per_turn = value;
+        }
+    ));
+    add_opt(common_arg(
+        {"--expert-sidecar"},
+        {},
+        "load the expert heatmap sidecar (<model>.tier) at start, save it at exit",
+        [](common_params & params, bool value) {
+            params.expert_sidecar = value;
+        }
+    ));
+    add_opt(common_arg(
+        {"--expert-gpu"}, "N|NAME",
+        "put the expert store on this GPU: index, or a device name like CUDA0 (default: -1 = all GPUs)",
+        [](common_params & params, const std::string & value) {
+            params.expert_gpu = llama_expert_preload::expert_gpu_parse(value);
+        }
+    ));
+    add_opt(common_arg(
+        {"--expert-hot-split"}, "N0,N1,N2,...",
+        "fraction of the hot expert slots to place on each GPU, comma-separated "
+        "list of proportions following the device order (e.g. 3,1); only used "
+        "when --expert-gpu is -1 (all GPUs)",
+        [](common_params & params, const std::string & value) {
+            std::string arg_next = value;
+            const std::regex regex{ R"([,/]+)" };
+            std::sregex_token_iterator it{ value.begin(), value.end(), regex, -1 };
+            std::vector<std::string> split_arg{ it, {} };
+            if (split_arg.size() >= llama_max_devices()) {
+                throw std::invalid_argument(
+                    string_format("got %zu input configs, but system only has %zu devices", split_arg.size(), llama_max_devices())
+                );
+            }
+            for (size_t i = 0; i < llama_max_devices(); ++i) {
+                if (i < split_arg.size()) {
+                    params.expert_hot_split[i] = std::stof(split_arg[i]);
+                } else {
+                    params.expert_hot_split[i] = 0.0f;
+                }
+            }
+            params.expert_hot_split_set = true;
+        }
+    ));
+    add_opt(common_arg(
+        {"--expert-cold-s"}, "N",
+        "number of bottom-C (coldest) expert slots to park on the coldstore "
+        "GPU (default: 0 = disabled); requires the hot store to be active",
+        [](common_params & params, int value) {
+            params.expert_cold_s = value;
+        }
+    ));
+    add_opt(common_arg(
+        {"--expert-cold-gpu"}, "NAME",
+        "put the coldstore on this GPU, a device name like CUDA1 (default: "
+        "unset = disabled)",
+        [](common_params & params, const std::string & value) {
+            params.expert_cold_gpu = llama_expert_preload::expert_gpu_parse(value);
+        }
+    ));
+    add_opt(common_arg(
+        {"--expert-boot-tokens"}, "N",
+        "fast-start converge window in decode tokens: while inside it the hot "
+        "store re-syncs fast with the dwell gates off; 0 = phase off (default: 512)",
+        [](common_params & params, int value) {
+            params.expert_boot_tokens = value;
+        }
+    ));
+    add_opt(common_arg(
+        {"--expert-cold-dwell-min"}, "N",
+        "min cold syncs a coldstore slot keeps before eviction, a floor that "
+        "applies even with --expert-dwell 0 (default: 2)",
+        [](common_params & params, int value) {
+            params.expert_cold_dwell_min = value;
+        }
+    ));
+    add_opt(common_arg(
+        {"--expert-cold-sync-step"}, "N",
+        "run the coldstore re-sync every Nth hot store re-sync; "
+        "0 = never after the startup batch (default: 4)",
+        [](common_params & params, int value) {
+            params.expert_cold_sync_step = value;
+        }
+    ));
     add_opt(common_arg(
         {"-mg", "--main-gpu"}, "INDEX",
         string_format("the GPU to use for the model (with split-mode = none), or for intermediate results and KV (with split-mode = row) (default: %d)", params.main_gpu),

@@ -496,6 +496,27 @@ extern "C" {
         struct llama_sampler_seq_config * samplers;
         size_t                            n_samplers;
 
+        // expert model parameters
+        const char * model_path;       // model file path; used for the expert heatmap sidecar (<model>.tier)
+        float expert_heat_decay;       // expert heatmap decay per update
+        int   expert_heat_log_period;  // expert heatmap log interval
+        int   expert_hot_s;            // number of top-S expert slots for GPU hot store
+        int   expert_sync_period;      // hot store re-sync cadence in tokens
+        float expert_hyst;             // hysteresis ratio for slot swaps
+        int   expert_dwell;            // min updates a resident slot keeps before swap
+        int   expert_pin_pct;          // percent of cold experts to keep pinned (madvise); -1 = auto
+        bool  expert_sidecar;          // load/save the expert heatmap sidecar (<model>.tier)
+        int   expert_move_mode;        // expert store mode: 0 = auto, 1 = copy, 2 = move
+        int   expert_gpu;              // put the expert store on this GPU index (-1 = all GPUs)
+        int   expert_swaps_per_turn;  // model-wide expert swaps per sync turn; 0 = unlimited
+        float expert_hot_split[128];   // per-GPU hot-slot proportions (-1 = all GPUs); 0 = follow tensor_split
+        bool  expert_hot_split_set;    // true when --expert-hot-split was given
+        int   expert_cold_s;           // number of bottom-C expert slots parked on the coldstore GPU (0 = disabled)
+        int   expert_cold_gpu;         // put the coldstore on this GPU index (-1 = disabled)
+        int   expert_boot_tokens;      // fast-start converge window in decode tokens; 0 = phase off (default 512)
+        int   expert_cold_dwell_min;   // min cold syncs a coldstore slot keeps before eviction (default 2)
+        int   expert_cold_sync_step;   // run the cold re-sync every Nth hot re-sync; 0 = never (default 4)
+
         // a source/target/parent context
         // can be utilized in various ways, for example by sharing results or llama_memory between 2 contexts
         struct llama_context * ctx_other;
