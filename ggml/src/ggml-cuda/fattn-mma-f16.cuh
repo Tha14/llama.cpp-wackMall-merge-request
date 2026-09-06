@@ -667,8 +667,8 @@ static __device__ __forceinline__ void flash_attn_ext_f16_iter(
                 } else {
                     const int k0_diff = k0_stop - k0_start;
                     constexpr bool use_cp_async = nstages == 1;
-                    flash_attn_ext_f16_load_tile<stride_tile_K, nwarps, nbatch_fa, use_cp_async, oob_check>
-                        (K_h2 + int64_t(k_VKQ_0)*stride_K + k0_start, tile_K, k0_diff, stride_K, k_VKQ_sup);
+                    flash_attn_ext_f16_load_tile<stride_tile_K, swz_K, nwarps, nbatch_fa, use_cp_async, oob_check, use_sparse>
+                        (K_h2 + int64_t(k_VKQ_0)*stride_K + k0_start, tile_K, k0_diff, stride_K, k_VKQ_0, k_VKQ_sup, nullptr);
                     if (use_cp_async) {
                         cp_async_wait_all();
                     }
@@ -1030,8 +1030,8 @@ static __device__ __forceinline__ void flash_attn_ext_f16_iter(
                     if (!V_is_K_view || i0_stop > 2*nbatch_K2) {
                         const int i0_diff = i0_stop - i0_start;
                         constexpr bool use_cp_async = nstages == 1;
-                        flash_attn_ext_f16_load_tile<stride_tile_V, nwarps, nbatch_fa, use_cp_async, oob_check>
-                            (V_h2 + int64_t(k_VKQ_0)*stride_V + i0_start/2, tile_V, i0_diff/2, stride_V, k_VKQ_sup);
+                        flash_attn_ext_f16_load_tile<stride_tile_V, swz_V, nwarps, nbatch_fa, use_cp_async, oob_check, use_sparse>
+                            (V_h2 + int64_t(k_VKQ_0)*stride_V + i0_start/2, tile_V, i0_diff/2, stride_V, k_VKQ_0, k_VKQ_sup, nullptr);
                         if (use_cp_async) {
                             cp_async_wait_all();
                         }
