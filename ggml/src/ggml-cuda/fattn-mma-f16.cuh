@@ -1218,23 +1218,25 @@ static __device__ __forceinline__ void flash_attn_ext_f16_process_tile(
 
     constexpr int warp_size = ggml_cuda_get_physical_warp_size();
 
+    using     T_A_KQ   = typename mma_tile_sizes<DKQ, ncols1>::T_A_KQ;
     using     T_B_KQ   = typename mma_tile_sizes<DKQ, ncols1>::T_B_KQ;
     using     T_C_KQ   = typename mma_tile_sizes<DKQ, ncols1>::T_C_KQ;
-    using     T_B_VKQ  = typename mma_tile_sizes<DV, ncols>::T_B_VKQ;
-    using     T_C_VKQ  = typename mma_tile_sizes<DV, ncols>::T_C_VKQ;
+    using     T_A_VKQ  = typename mma_tile_sizes<DV, ncols2>::T_A_VKQ;
+    using     T_B_VKQ  = typename mma_tile_sizes<DV, ncols2>::T_B_VKQ;
+    using     T_C_VKQ  = typename mma_tile_sizes<DV, ncols2>::T_C_VKQ;
 
     constexpr int  cols_per_warp   = T_B_KQ::I;
     constexpr int  cols_per_thread = get_cols_per_thread();
-    constexpr int  np              = cols_per_warp > ncols ? nwarps : nwarps * cols_per_warp/ncols; // Number of parallel CUDA warps per Q column.
-    constexpr int  nbatch_fa       = ggml_cuda_fattn_mma_get_nbatch_fa     (DKQ, DV, ncols);
-    constexpr int  nbatch_K2       = ggml_cuda_fattn_mma_get_nbatch_K2     (DKQ, DV, ncols);
-    constexpr int  nbatch_V2       = ggml_cuda_fattn_mma_get_nbatch_V2     (DKQ, DV, ncols);
-    constexpr int  nbatch_combine  = ggml_cuda_fattn_mma_get_nbatch_combine(DKQ, DV, ncols);
-    constexpr bool Q_in_reg        = ggml_cuda_fattn_mma_get_Q_in_reg      (DKQ, DV, ncols);
+    constexpr int  np              = cols_per_warp > ncols2 ? nwarps : nwarps * cols_per_warp/ncols2; // Number of parallel CUDA warps per Q column.
+    constexpr int  nbatch_fa       = ggml_cuda_fattn_mma_get_nbatch_fa     (DKQ, DV, ncols2);
+    constexpr int  nbatch_K2       = ggml_cuda_fattn_mma_get_nbatch_K2     (DKQ, DV, ncols2);
+    constexpr int  nbatch_V2       = ggml_cuda_fattn_mma_get_nbatch_V2     (DKQ, DV, ncols2);
+    constexpr int  nbatch_combine  = ggml_cuda_fattn_mma_get_nbatch_combine(DKQ, DV, ncols2);
+    constexpr bool Q_in_reg        = ggml_cuda_fattn_mma_get_Q_in_reg      (DKQ, DV, ncols2);
     constexpr bool is_kvarn_kv     = ggml_cuda_fattn_kvarn_template_type(type_K) || ggml_cuda_fattn_kvarn_template_type(type_V);
     constexpr int  nstages         = is_kvarn_kv ? 0 : ggml_cuda_fattn_mma_get_nstages(DKQ, DV, ncols1, ncols2, use_sparse);
 
-    if (cols_per_warp > ncols) {
+    if (cols_per_warp > ncols2) {
         NO_DEVICE_CODE;
         return;
     }
@@ -1250,7 +1252,7 @@ static __device__ __forceinline__ void flash_attn_ext_f16_process_tile(
     constexpr bool swz_V = V_is_K_view ? swz_K : ggml_cuda_fattn_smem_swizzle::enabled(nbatch_V2);
 
     extern __shared__ half2 tile_Q[];
-    half2 * tile_K    = Q_in_reg              ? tile_Q                             : tile_Q + ncols     * stride_tile_Q;
+    half2 * tile_K    = Q_in_reg              ? tile_Q                             : tile_Q + ncols2     * stride_tile_Q;
     half2 * tile_V    =           nstages > 1 ? tile_K + nbatch_fa * stride_tile_K : tile_K;
     half  * tile_mask = (half *) (nstages > 1 ? tile_V + nbatch_fa * stride_tile_V : tile_V + nbatch_fa * stride_tile_KV_max);
     half * kvarn_smem = tile_mask + ncols1 * (nbatch_fa + 8);
@@ -1302,10 +1304,10 @@ static __device__ __forceinline__ void flash_attn_ext_f16_process_tile(
         }
 
 #pragma unroll
-        for (int jc0 = 0; jc0 < ncols; jc0 += nwarps*stride_jc) {
+        for (int jc0 = 0; jc0 < ncols2; jc0 += nwarps*stride_jc) {
             const int jc = jc0 + threadIdx.y*stride_jc + (stride_k == warp_size ? 0 : threadIdx.x / stride_k);
 
-            if (jc0 + nwarps*stride_jc > ncols && jc >= ncols) {
+            if (jc0 + nwarps*stride_jc > ncols2 && jc >= ncols2) {
                 break;
             }
 
@@ -1549,11 +1551,11 @@ static __device__ __forceinline__ void flash_attn_ext_f16_process_tile(
         if (np == 1) {
             // No combination is needed, the meta data can be directly written from registers to VRAM.
             if (needs_fixup && threadIdx.x < T_B_KQ::I) {
-                float2 * dstk_fixup_meta = dstk_fixup + blockIdx.x*ncols;
+                float2 * dstk_fixup_meta = dstk_fixup + blockIdx.x*ncols2;
                 dstk_fixup_meta[jc_cwm] = KQ_cmr;
             }
             if (is_fixup && threadIdx.x < T_B_KQ::I) {
-                float2 * dstk_fixup_meta = dstk_fixup + (gridDim.x + blockIdx.x)*ncols;
+                float2 * dstk_fixup_meta = dstk_fixup + (gridDim.x + blockIdx.x)*ncols2;
                 dstk_fixup_meta[jc_cwm] = KQ_cmr;
             }
             if (!is_kvarn_kv && !needs_fixup && !is_fixup && dst_final_meta && threadIdx.x < T_B_KQ::I) {
@@ -1595,11 +1597,11 @@ static __device__ __forceinline__ void flash_attn_ext_f16_process_tile(
         if (np == 1) {
             // No combination is needed, the meta data can be directly written from registers to VRAM.
             if (needs_fixup && thread_should_write) {
-                float2 * dstk_fixup_meta = dstk_fixup + blockIdx.x*ncols;
+                float2 * dstk_fixup_meta = dstk_fixup + blockIdx.x*ncols2;
                 dstk_fixup_meta[jc_cwm] = KQ_cmr;
             }
             if (is_fixup && thread_should_write) {
-                float2 * dstk_fixup_meta = dstk_fixup + (gridDim.x + blockIdx.x)*ncols;
+                float2 * dstk_fixup_meta = dstk_fixup + (gridDim.x + blockIdx.x)*ncols2;
                 dstk_fixup_meta[jc_cwm] = KQ_cmr;
             }
             if (!is_kvarn_kv && !needs_fixup && !is_fixup && dst_final_meta && thread_should_write) {
@@ -1671,17 +1673,17 @@ static __device__ __forceinline__ void flash_attn_ext_f16_process_tile(
         // Combined KQ max + rowsum.
         static_assert(cols_per_warp <= warp_size);
         if (needs_fixup && (cols_per_warp == warp_size || threadIdx.x < cols_per_warp)) {
-            float2 * dstk_fixup_meta = dstk_fixup + blockIdx.x*ncols;
+            float2 * dstk_fixup_meta = dstk_fixup + blockIdx.x*ncols2;
             dstk_fixup_meta[(threadIdx.y/np)*cols_per_warp + threadIdx.x] = make_float2(KQ_cmn, KQ_crs);
         }
         if (is_fixup && (cols_per_warp == warp_size || threadIdx.x < cols_per_warp)) {
-            float2 * dstk_fixup_meta = dstk_fixup + (gridDim.x + blockIdx.x)*ncols;
+            float2 * dstk_fixup_meta = dstk_fixup + (gridDim.x + blockIdx.x)*ncols2;
             dstk_fixup_meta[(threadIdx.y/np)*cols_per_warp + threadIdx.x] = make_float2(KQ_cmn, KQ_crs);
         }
         if (!is_kvarn_kv && !needs_fixup && !is_fixup && dst_final_meta &&
                 (cols_per_warp == warp_size || threadIdx.x < cols_per_warp)) {
             const int jc = (threadIdx.y/np)*cols_per_warp + threadIdx.x;
-            if (jc < ncols) {
+            if (jc < ncols2) {
                 const int j = jc / ncols2;
                 const int c = jc % ncols2;
                 if (jt*ncols1 + j < int(ne01.z) && zt_gqa*ncols2 + c < gqa_ratio) {
@@ -1760,9 +1762,9 @@ static __device__ __forceinline__ void flash_attn_ext_f16_process_tile(
         __syncthreads();
 
         if (np == 1 || threadIdx.y % np == 0) {
-            // The first 2*2*gridDim.x*ncols floats in dstk_fixup are for storing max. values and row sums.
+            // The first 2*2*gridDim.x*ncols2 floats in dstk_fixup are for storing max. values and row sums.
             // The values after that are for the partial results of the individual blocks.
-            float2 * dstk_fixup_data = dstk_fixup + gridDim.x*(2*ncols) + blockIdx.x*(ncols*(DV/2));
+            float2 * dstk_fixup_data = dstk_fixup + gridDim.x*(2*ncols2) + blockIdx.x*(ncols2*(DV/2));
 
 #pragma unroll
             for (int stride_k : {warp_size, warp_size/2, warp_size/4, warp_size/8}) {
@@ -1775,10 +1777,10 @@ static __device__ __forceinline__ void flash_attn_ext_f16_process_tile(
                 }
 
 #pragma unroll
-                for (int jc0_dst = 0; jc0_dst < ncols; jc0_dst += (nwarps/np)*stride_jc) {
+                for (int jc0_dst = 0; jc0_dst < ncols2; jc0_dst += (nwarps/np)*stride_jc) {
                     const int jc_dst = jc0_dst + (threadIdx.y/np)*stride_jc + (stride_k == warp_size ? 0 : threadIdx.x / stride_k);
 
-                    if (jc0_dst + (nwarps/np)*stride_jc > ncols && jc_dst >= ncols) {
+                    if (jc0_dst + (nwarps/np)*stride_jc > ncols2 && jc_dst >= ncols2) {
                         break;
                     }
 
