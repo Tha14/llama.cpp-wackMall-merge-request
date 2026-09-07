@@ -39,7 +39,7 @@ jobs:
       - name: ccache
         uses: ggml-org/ccache-action@v1.2.21
         with:
-          key: release-windows-2022-x64-cuda-${{ matrix.cuda }}
+                    key: release-windows-2022-x64-cuda-${{ matrix.cuda }}-v2
 
       - name: Install Cuda Toolkit
         uses: ./.github/actions/windows-setup-cuda
@@ -74,4 +74,4 @@ jobs:
       - name: ccache-clear
         uses: ./.github/actions/ccache-clear
         with:
-          key: release-windows-2022-x64-cuda-${{ matrix.cuda }}
+                    key: release-windows-2022-x64-cuda-${{ matrix.cuda }}-v2
