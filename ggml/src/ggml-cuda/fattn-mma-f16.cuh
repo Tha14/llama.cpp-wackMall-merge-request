@@ -1792,8 +1792,10 @@ static constexpr __host__ __device__ bool ggml_cuda_flash_attn_ext_mma_f16_may_u
            (DKQ == 576 && DV == 512 && ncols1 == 1 && ncols2 == 16);
 }
 
-template<int DKQ, int DV, int ncols1, int ncols2, bool use_logit_softcap, bool V_is_K_view, bool use_sparse>
-__global__ void flash_attn_ext_f16(
+template<int DKQ, int DV, int ncols1, int ncols2, bool use_logit_softcap, bool V_is_K_view, bool use_sparse,
+    ggml_type type_K = GGML_TYPE_F16, ggml_type type_V = GGML_TYPE_F16>
+__launch_bounds__(ggml_cuda_fattn_mma_get_nthreads(DKQ, DV, ncols1*ncols2), ggml_cuda_fattn_mma_get_occupancy(DKQ, DV, ncols1*ncols2))
+static __global__ void flash_attn_ext_f16(
         const char * Q_ptr,
         const char * K_ptr,
         const char * V_ptr,
@@ -1802,6 +1804,7 @@ __global__ void flash_attn_ext_f16(
         const int  * KV_max_ptr,
         float      * dst_ptr,
         float2     * dst_meta_ptr,
+        float2     * dst_final_meta_ptr,
         const float scale,
         const float max_bias,
         const float m0,
@@ -1822,10 +1825,11 @@ __global__ void flash_attn_ext_f16(
     const char * GGML_CUDA_RESTRICT V              = V_ptr;
     const char * GGML_CUDA_RESTRICT mask           = mask_ptr;
     const char * GGML_CUDA_RESTRICT sinks          = sinks_ptr;
-    const int  * GGML_CUDA_RESTRICT KV_max         = use_sparse ? nullptr : KV_max_ptr;
+    const int  * GGML_CUDA_RESTRICT KV_max         = KV_max_ptr;
     const int  * GGML_CUDA_RESTRICT sparse_indices = use_sparse ? KV_max_ptr : nullptr;
     float      * GGML_CUDA_RESTRICT dst            = dst_ptr;
     float2     * GGML_CUDA_RESTRICT dst_meta       = dst_meta_ptr;
+    float2     * GGML_CUDA_RESTRICT dst_final_meta = dst_final_meta_ptr;
 
     // Skip unused kernel variants for faster compilation:
     if (use_logit_softcap && !(DKQ == 128 || DKQ == 256 || DKQ == 512)) {
@@ -1978,7 +1982,7 @@ __global__ void flash_attn_ext_f16(
         (Q_f2, K_h2, V_h2, mask_h, indices, sinks_f, dstk, dst_meta, scale, slope, logit_softcap,
          ne01, ne02, gqa_ratio, ne11, stride_Q1, stride_Q2, stride_K, stride_V, stride_mask, jt, zt_gqa, kb0_start, kb0_stop);
 #else
-    GGML_UNUSED_VARS(Q_ptr, K_ptr, V_ptr, mask_ptr, sinks_ptr, KV_max_ptr, dst_ptr, dst_meta_ptr, scale,
+    GGML_UNUSED_VARS(Q_ptr, K_ptr, V_ptr, mask_ptr, sinks_ptr, KV_max_ptr, dst_ptr, dst_meta_ptr, dst_final_meta_ptr, scale,
         max_bias, m0, m1, n_head_log2, logit_softcap,
         ne00, ne01, ne02, ne03,
               nb01, nb02, nb03,
