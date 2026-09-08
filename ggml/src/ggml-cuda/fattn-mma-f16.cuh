@@ -1793,8 +1793,7 @@ static constexpr __host__ __device__ bool ggml_cuda_flash_attn_ext_mma_f16_may_u
 }
 
 template<int DKQ, int DV, int ncols1, int ncols2, bool use_logit_softcap, bool V_is_K_view, bool use_sparse>
-__launch_bounds__(ggml_cuda_fattn_mma_get_nthreads(DKQ, DV, ncols1*ncols2), ggml_cuda_fattn_mma_get_occupancy(DKQ, DV, ncols1*ncols2))
-static __global__ void flash_attn_ext_f16(
+__global__ void flash_attn_ext_f16(
         const char * Q_ptr,
         const char * K_ptr,
         const char * V_ptr,
