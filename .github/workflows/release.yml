@@ -166,7 +166,7 @@ jobs:
       - name: ccache
         uses: ggml-org/ccache-action@v1.2.21
         with:
-                    key: release-windows-2022-x64-cuda-${{ matrix.cuda }}-v3
+                    key: release-windows-2022-x64-cuda-${{ matrix.cuda }}-v4
 
       - name: Build
         id: cmake_build
@@ -188,7 +188,7 @@ jobs:
       - name: ccache-clear
         uses: ./.github/actions/ccache-clear
         with:
-                    key: release-windows-2022-x64-cuda-${{ matrix.cuda }}-v3
+                    key: release-windows-2022-x64-cuda-${{ matrix.cuda }}-v4
 
       - name: Pack artifacts
         id: pack_artifacts

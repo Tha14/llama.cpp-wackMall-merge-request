@@ -55,7 +55,7 @@ jobs:
       - name: ccache
         uses: ggml-org/ccache-action@v1.2.21
         with:
-          key: cuda-ubuntu-24.04-cuda-v3
+          key: cuda-ubuntu-24.04-cuda-v4
           evict-old-files: 1d
           save: ${{ github.event_name == 'push' && github.ref == 'refs/heads/master' }}
 
@@ -75,4 +75,4 @@ jobs:
       - name: ccache-clear
         uses: ./.github/actions/ccache-clear
         with:
-          key: cuda-ubuntu-24.04-cuda-v3
+          key: cuda-ubuntu-24.04-cuda-v4
